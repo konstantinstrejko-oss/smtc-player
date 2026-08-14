@@ -10,7 +10,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Windows PowerShell 5.1, а не pwsh: build.ps1 работает с классическими
       # сборками .NET Framework (System.IO.Compression, csc.exe из v4.0.30319)
@@ -22,7 +22,7 @@ jobs:
         shell: powershell
         run: Get-ChildItem dist | Format-List Name, Length
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SMTC-Player-rmskin
           path: dist/SMTC-Player.rmskin
