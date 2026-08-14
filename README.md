@@ -28,7 +28,7 @@ the Windows media overlay.
 2. Load **SMTC Player** from the Rainmeter manage window if it does not appear
    right away.
 
-Requires Rainmeter 4.5+ and Windows 8 or newer (SMTC API).
+Requires Rainmeter 4.5+ and Windows 10 1809 or newer (that is when the SMTC API appeared).
 
 ## How it works
 
@@ -41,9 +41,14 @@ smtc_bridge.exe                        Rainmeter
  └─ cmd.ini      ◀──!WriteKeyValue──   button clicks
 ```
 
-The bridge is a ~13 KB C# executable with no window. The skin starts it on load,
+The bridge is a ~14 KB C# executable with no window. The skin starts it on load,
 a mutex keeps a single copy, and it exits on its own about a minute after
-Rainmeter is gone. Album art is written to `%LOCALAPPDATA%\RainmeterSMTC`.
+Rainmeter is gone.
+
+On first run it copies itself to `%LOCALAPPDATA%\RainmeterSMTC` and runs from
+there — a running executable inside the skin folder cannot be moved, and the
+Rainmeter installer moves that folder to `@Backup` on every update. Album art
+and logs land in the same folder.
 
 ## Configuration
 

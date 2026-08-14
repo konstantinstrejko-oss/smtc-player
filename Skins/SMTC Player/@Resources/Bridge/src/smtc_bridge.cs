@@ -278,6 +278,126 @@ public static class SmtcBridge
 
     // ---------------------------------------------------------------- main
 
+    // Возвращает true, если работу подхватила копия в %LOCALAPPDATA% и этот
+    // процесс должен просто выйти.
+    static bool RelaunchFromLocalCopy(string[] args)
+    {
+        try
+        {
+            string self = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            string runDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RainmeterSMTC");
+            string runPath = Path.Combine(runDir, "smtc_bridge.exe");
+
+            if (string.Equals(self, runPath, StringComparison.OrdinalIgnoreCase))
+                return false;   // уже работаем из локальной копии
+
+            Directory.CreateDirectory(runDir);
+
+            // старую копию нужно погасить, иначе файл занят и не перезапишется
+            int me = Process.GetCurrentProcess().Id;
+            foreach (var p in Process.GetProcessesByName("smtc_bridge"))
+            {
+                if (p.Id == me) continue;
+                try { p.Kill(); p.WaitForExit(3000); } catch { }
+            }
+
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try { File.Copy(self, runPath, true); break; }
+                catch (IOException) { Thread.Sleep(200); }
+            }
+
+            string cmdLine = "\"" + runPath + "\" " + BuildArguments(args);
+            if (!StartDetached(runPath, cmdLine, runDir))
+            {
+                // не отвязались — пробуем обычным способом, лучше так, чем никак
+                var psi = new ProcessStartInfo(runPath);
+                psi.Arguments = BuildArguments(args);
+                psi.UseShellExecute = false;
+                psi.WorkingDirectory = runDir;
+                Process.Start(psi);
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // не вышло — не страшно, отработаем прямо отсюда
+            Log("перезапуск из локальной копии не удался: " + ex.Message);
+            return false;
+        }
+    }
+
+    // Rainmeter держит запущенные им процессы в своём job-объекте: стоит
+    // родителю выйти, как job закрывается и уносит с собой всех потомков.
+    // Поэтому копию поднимаем отвязанной от job.
+    const uint DETACHED_PROCESS = 0x00000008;
+    const uint CREATE_NO_WINDOW = 0x08000000;
+    const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct StartupInfo
+    {
+        public int cb;
+        public IntPtr lpReserved, lpDesktop, lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ProcessInformation
+    {
+        public IntPtr hProcess, hThread;
+        public int dwProcessId, dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcess(string applicationName, StringBuilder commandLine,
+        IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint creationFlags,
+        IntPtr environment, string currentDirectory, ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    static bool StartDetached(string exePath, string commandLine, string workingDir)
+    {
+        var si = new StartupInfo();
+        si.cb = Marshal.SizeOf(typeof(StartupInfo));
+        ProcessInformation pi;
+
+        uint flags = DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB;
+        bool ok = CreateProcess(exePath, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero,
+                                false, flags, IntPtr.Zero, workingDir, ref si, out pi);
+
+        if (!ok)
+        {
+            // job может запрещать breakaway — тогда пробуем без него
+            flags = DETACHED_PROCESS | CREATE_NO_WINDOW;
+            ok = CreateProcess(exePath, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero,
+                               false, flags, IntPtr.Zero, workingDir, ref si, out pi);
+        }
+
+        if (ok)
+        {
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+        return ok;
+    }
+
+    static string BuildArguments(string[] args)
+    {
+        var sb = new StringBuilder();
+        foreach (string a in args)
+        {
+            if (sb.Length > 0) sb.Append(' ');
+            sb.Append('"').Append(a.Replace("\"", "\\\"")).Append('"');
+        }
+        return sb.ToString();
+    }
+
     static int Main(string[] args)
     {
         DataDir = Path.Combine(
@@ -298,6 +418,15 @@ public static class SmtcBridge
                 int.TryParse(args[i + 1], out PollMs);
         }
         if (PollMs < 50) PollMs = 250;
+
+        Directory.CreateDirectory(DataDir);
+        LogFile = Path.Combine(DataDir, "bridge.log");
+
+        // Запущенный exe нельзя ни перезаписать, ни перенести, а лежит он в
+        // папке скина — установщик Rainmeter спотыкается об это при каждом
+        // обновлении («Unable to move to ...\@Backup»). Поэтому из папки скина
+        // мост только переносит себя в %LOCALAPPDATA% и работает уже оттуда.
+        if (RelaunchFromLocalCopy(args)) return 0;
 
         bool created;
         using (var mutex = new Mutex(true, "Local\\RainmeterSMTCBridge", out created))

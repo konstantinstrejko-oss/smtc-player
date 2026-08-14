@@ -37,7 +37,7 @@ Copy-Item (Join-Path $root 'RMSKIN.bmp') $staging -Force
 Copy-Item $skinSrc (Join-Path $staging 'Skins\SMTC Player') -Recurse -Force
 
 # рабочие файлы конкретной машины в пакет не идут
-foreach ($junk in @('Player\cmd.ini', '@Resources\Bridge\bridge.log', 'obj')) {
+foreach ($junk in @('Player\cmd.inc', '@Resources\Bridge\bridge.log', 'obj')) {
     $p = Join-Path $staging "Skins\SMTC Player\$junk"
     if (Test-Path $p) { Remove-Item $p -Recurse -Force }
 }

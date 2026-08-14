@@ -1,4 +1,4 @@
-# Копирует скин из репозитория в папку Rainmeter и перезагружает его.
+﻿# Копирует скин из репозитория в папку Rainmeter и перезагружает его.
 # Нужно при разработке: правишь в репозитории — проверяешь вживую.
 param([string]$SkinPath)
 
@@ -25,7 +25,7 @@ Start-Sleep -Milliseconds 400
 
 if (-not (Test-Path $dst)) { New-Item -ItemType Directory -Force $dst | Out-Null }
 # cmd.ini не трогаем: это рабочий канал команд, его создаёт мост
-robocopy $src $dst /MIR /XF cmd.ini bridge.log /NFL /NDL /NJH /NJS /NP | Out-Null
+robocopy $src $dst /MIR /XF cmd.inc bridge.log /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy вернул $LASTEXITCODE" }
 
 $rainmeter = Join-Path ${env:ProgramFiles} 'Rainmeter\Rainmeter.exe'
