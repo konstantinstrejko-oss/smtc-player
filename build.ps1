@@ -44,7 +44,9 @@ foreach ($junk in @('Player\cmd.inc', '@Resources\Bridge\bridge.log', 'obj')) {
 
 Write-Host '== упаковка =='
 if (-not (Test-Path $dist)) { New-Item -ItemType Directory -Force $dist | Out-Null }
-$outFile = Join-Path $dist ("SMTC-Player-$version.rmskin")
+# имя без версии: ссылка /releases/latest/download/SMTC-Player.rmskin должна
+# оставаться рабочей от релиза к релизу
+$outFile = Join-Path $dist "SMTC-Player.rmskin"
 if (Test-Path $outFile) { Remove-Item $outFile -Force }
 
 $zipPath = Join-Path $root "obj\package.zip"

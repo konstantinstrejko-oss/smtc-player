@@ -1,0 +1,35 @@
+name: build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows PowerShell 5.1, а не pwsh: build.ps1 работает с классическими
+      # сборками .NET Framework (System.IO.Compression, csc.exe из v4.0.30319)
+      - name: Собрать пакет
+        shell: powershell
+        run: .\build.ps1
+
+      - name: Показать содержимое пакета
+        shell: powershell
+        run: Get-ChildItem dist | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SMTC-Player-rmskin
+          path: dist/SMTC-Player.rmskin
+          if-no-files-found: error
+
+      - name: Приложить к релизу
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SMTC-Player.rmskin
