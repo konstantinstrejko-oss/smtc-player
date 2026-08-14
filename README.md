@@ -4,6 +4,8 @@
 [![Release](https://img.shields.io/github/v/release/konstantinstrejko-oss/smtc-player)](https://github.com/konstantinstrejko-oss/smtc-player/releases/latest)
 [![License](https://img.shields.io/github/license/konstantinstrejko-oss/smtc-player)](LICENSE)
 
+*[Русская версия](README.ru.md)*
+
 A minimal now-playing widget for [Rainmeter](https://www.rainmeter.net/) that
 reads **Windows SMTC** (Global System Media Transport Controls) — the same
 system channel that draws the volume overlay with album art.
@@ -24,6 +26,15 @@ the Windows media overlay.
 
 Requires Rainmeter 4.5+ and Windows 10 1809 or newer (that is when the SMTC API
 appeared). To move the widget, drag it; to resize it, scroll on it.
+
+### Don't have Rainmeter yet?
+
+Rainmeter is free and open source, and this widget cannot run without it:
+
+- official site: **https://www.rainmeter.net/**
+- source and releases: **https://github.com/rainmeter/rainmeter/releases/latest**
+
+The default installer is all you need.
 
 > **Windows may warn about the bundled `.exe`.** It is the background bridge —
 > unsigned, because code-signing certificates cost money. The full C# source is
