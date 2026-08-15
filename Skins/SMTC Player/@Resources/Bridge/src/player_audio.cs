@@ -194,13 +194,33 @@ public static class AppVolume
         return null;
     }
 
-    /// <summary>Громкость 0..1, либо -1 если сессию найти не удалось.</summary>
+    static float _lastValue = -1;
+    static string _lastFor = "";
+
+    /// <summary>
+    /// Громкость 0..1, либо -1 если сессию найти не удалось ни разу.
+    ///
+    /// На паузе Яндекс Музыка закрывает аудиосессию, и та пропадает из
+    /// перечисления. Прятать из-за этого ползунок нельзя — он бы мигал на каждой
+    /// паузе, поэтому держим последнее известное значение.
+    /// </summary>
     public static float Get(string appId)
     {
         var v = Resolve(appId);
-        if (v == null) return -1;
-        try { float level; return v.GetMasterVolume(out level) == 0 ? level : -1; }
-        catch { _cached = null; return -1; }
+        if (v != null)
+        {
+            try
+            {
+                float level;
+                if (v.GetMasterVolume(out level) == 0)
+                {
+                    _lastValue = level; _lastFor = appId;
+                    return level;
+                }
+            }
+            catch { _cached = null; }
+        }
+        return appId == _lastFor ? _lastValue : -1;
     }
 
     public static void Set(string appId, float level)

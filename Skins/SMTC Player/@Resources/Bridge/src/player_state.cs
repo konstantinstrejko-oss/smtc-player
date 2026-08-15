@@ -199,10 +199,39 @@ public static class History
         }
     }
 
+    /// <summary>
+    /// Тот же трек уже записан только что? Долгая пауза и перезапуск сбрасывают
+    /// «текущий трек», и без этой проверки одно прослушивание попадало в журнал
+    /// дважды.
+    /// </summary>
+    static bool JustLogged(string title, string artist)
+    {
+        try
+        {
+            if (!File.Exists(File_)) return false;
+            var lines = File.ReadAllLines(File_, Encoding.UTF8);
+            for (int i = lines.Length - 1; i >= 0 && i >= lines.Length - 3; i--)
+            {
+                var p = lines[i].Split('\t');
+                if (p.Length < 3) continue;
+                if (p[1] != Clean(artist) || p[2] != Clean(title)) continue;
+
+                DateTime when;
+                if (!DateTime.TryParse(p[0], CultureInfo.InvariantCulture,
+                                       DateTimeStyles.None, out when)) return true;
+                return (DateTime.Now - when).TotalMinutes < 20;
+            }
+        }
+        catch { }
+        return false;
+    }
+
     static void Write(string title, string artist, string app, string cover)
     {
         try
         {
+            if (JustLogged(title, artist)) return;
+
             Directory.CreateDirectory(Settings.Dir);
             Directory.CreateDirectory(CoverDir);
 

@@ -85,25 +85,35 @@ public class ShardApp : Application
             Shutdown();
         };
 
-        // -Show открывает окно сразу: иначе его никак не проверить, кроме как
-        // руками кликнув по иконке.
+        // -Show и -History открывают окна сразу: иначе их никак не проверить,
+        // кроме как руками через иконку в трее.
         foreach (string a in Environment.GetCommandLineArgs())
+        {
             if (a.Equals("-Show", StringComparison.OrdinalIgnoreCase))
-            {
                 Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Toggle));
-                break;
-            }
+            else if (a.Equals("-History", StringComparison.OrdinalIgnoreCase))
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(ShowHistory));
+        }
 
         // Окно тяжелее фонового процесса впятеро, поэтому живёт только пока нужно.
-        _unload = new DispatcherTimer { Interval = TimeSpan.FromSeconds(60) };
+        _unload = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(Math.Max(5, Settings.GetInt("UnloadSeconds", 60)))
+        };
         _unload.Tick += delegate
         {
             _unload.Stop();
-            if (_window != null && !_window.IsVisible)
-            {
-                _window.Close();
-                _window = null;
-            }
+            if (_window == null || _window.IsVisible) return;
+
+            _window.Close();
+            _window = null;
+
+            // WPF отдаёт немало памяти только после сборки; без этого процесс
+            // так и висит со ~140 МБ, хотя окна уже нет
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            Trim();
         };
     }
 
@@ -112,8 +122,27 @@ public class ShardApp : Application
         if (_window != null && _window.IsVisible) { _window.HideSmooth(); _unload.Start(); return; }
 
         _unload.Stop();
-        if (_window == null) _window = new PlayerWindow();
+        if (_window == null)
+        {
+            _window = new PlayerWindow();
+            // окно закрывается ещё по Esc и по потере фокуса — без этой подписки
+            // отсчёт выгрузки в тех случаях просто не начинался
+            _window.IsVisibleChanged += delegate
+            {
+                if (_window == null) return;
+                if (_window.IsVisible) _unload.Stop(); else _unload.Start();
+            };
+        }
         _window.ShowSmooth();
+    }
+
+    [System.Runtime.InteropServices.DllImport("psapi.dll")]
+    static extern int EmptyWorkingSet(IntPtr process);
+
+    static void Trim()
+    {
+        try { EmptyWorkingSet(System.Diagnostics.Process.GetCurrentProcess().Handle); }
+        catch { }
     }
 
     void Relayout()
@@ -163,7 +192,18 @@ public class HistoryWindow : Window
             HorizontalContentAlignment = HorizontalAlignment.Stretch
         };
         Content = _list;
+
+        // иначе системная рамка остаётся светлой поверх тёмного списка
+        SourceInitialized += delegate
+        {
+            IntPtr h = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            int dark = 1;
+            DwmSetWindowAttribute(h, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, ref dark, 4);
+        };
     }
+
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int value, int size);
 
     public void Reload()
     {

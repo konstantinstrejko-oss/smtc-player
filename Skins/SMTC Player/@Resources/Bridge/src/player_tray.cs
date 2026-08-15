@@ -63,6 +63,7 @@ public class TrayIcon : IDisposable
 
     readonly HwndSource _source;
     readonly DispatcherTimer _timer;
+    WheelHook _wheel;
     IntPtr _icon = IntPtr.Zero;
     bool _added;
     string _lastTip = "";
@@ -97,6 +98,7 @@ public class TrayIcon : IDisposable
 
         Add();
         Hotkeys.Register(_source.Handle);
+        _wheel = new WheelHook(_source.Handle, delegate (int delta) { Do(delta > 0 ? "vol+" : "vol-"); });
 
         PlayerState.Changed += OnStateChanged;
 
@@ -190,6 +192,10 @@ public class TrayIcon : IDisposable
 
         // версия 4: событие лежит в младшем слове lParam, курсор — в wParam
         int evt = (int)((long)lParam & 0xFFFF);
+
+        if (Settings.GetBool("Debug", false))
+            Diag.Log(string.Format("трей: evt=0x{0:X4} wParam=0x{1:X} lParam=0x{2:X}",
+                                   evt, (long)wParam, (long)lParam));
         switch (evt)
         {
             case WM_LBUTTONUP:
@@ -205,11 +211,9 @@ public class TrayIcon : IDisposable
                 ShowMenu();
                 handled = true;
                 break;
-            case WM_MOUSEWHEEL:
-                int delta = (short)(((long)wParam >> 16) & 0xFFFF);
-                Do(delta > 0 ? "vol+" : "vol-");
-                handled = true;
-                break;
+            // WM_MOUSEWHEEL здесь бесполезен: в схеме NOTIFYICON_VERSION_4 в
+            // wParam лежат координаты курсора, а величины прокрутки нет вовсе.
+            // Колесо ловится хуком — см. WheelHook.
         }
         return IntPtr.Zero;
     }
@@ -326,6 +330,7 @@ public class TrayIcon : IDisposable
     {
         _timer.Stop();
         PlayerState.Changed -= OnStateChanged;
+        if (_wheel != null) { _wheel.Dispose(); _wheel = null; }
         Hotkeys.Unregister();
         if (_added)
         {
@@ -336,6 +341,95 @@ public class TrayIcon : IDisposable
         TrayArt.Release(_icon);
         _icon = IntPtr.Zero;
         _source.Dispose();
+    }
+}
+
+/// <summary>
+/// Колесо над иконкой трея.
+///
+/// Штатного пути нет: схема NOTIFYICON_VERSION_4 сообщает о прокрутке, но не
+/// передаёт её величину — в wParam лежат координаты курсора. Поэтому величина
+/// берётся из низкоуровневого хука, а принадлежность прокрутки нашей иконке
+/// проверяется по прямоугольнику от Shell_NotifyIconGetRect.
+///
+/// Если иконка спрятана под шеврон, Windows отдаёт прямоугольник самой кнопки
+/// переполнения — прокрутка работает над ней, но не над иконкой внутри
+/// раскрытой панели: там колесо забирает себе оболочка.
+/// </summary>
+public class WheelHook : IDisposable
+{
+    delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr SetWindowsHookEx(int idHook, HookProc fn, IntPtr module, uint thread);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hook);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr w, IntPtr l);
+    [DllImport("shell32.dll")] static extern int Shell_NotifyIconGetRect(ref NotifyIconIdentifier id, out RECT r);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct NotifyIconIdentifier { public int cbSize; public IntPtr hWnd; public int uID; public Guid guidItem; }
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct POINTL { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct MouseLowLevel { public POINTL pt; public int mouseData; public int flags; public int time; public IntPtr extra; }
+
+    const int WH_MOUSE_LL = 14;
+    const int WM_MOUSEWHEEL = 0x020A;
+
+    readonly HookProc _proc;     // держим ссылку: иначе делегат соберёт GC
+    readonly IntPtr _hook;
+    readonly IntPtr _owner;
+    readonly Action<int> _onWheel;
+
+    RECT _rect;
+    DateTime _rectStamp = DateTime.MinValue;
+
+    public WheelHook(IntPtr ownerWindow, Action<int> onWheel)
+    {
+        _owner = ownerWindow;
+        _onWheel = onWheel;
+        _proc = Callback;
+        _hook = SetWindowsHookEx(WH_MOUSE_LL, _proc, IntPtr.Zero, 0);
+        if (_hook == IntPtr.Zero) Diag.Log("хук колеса не установлен");
+    }
+
+    bool OverIcon(int x, int y)
+    {
+        // прямоугольник иконки меняется редко, а запрос не бесплатный
+        if ((DateTime.UtcNow - _rectStamp).TotalSeconds > 2)
+        {
+            var id = new NotifyIconIdentifier { hWnd = _owner, uID = 1, guidItem = Guid.Empty };
+            id.cbSize = Marshal.SizeOf(typeof(NotifyIconIdentifier));
+            RECT r;
+            if (Shell_NotifyIconGetRect(ref id, out r) == 0) _rect = r;
+            else _rect = new RECT();
+            _rectStamp = DateTime.UtcNow;
+        }
+        return x >= _rect.Left && x < _rect.Right && y >= _rect.Top && y < _rect.Bottom;
+    }
+
+    IntPtr Callback(int code, IntPtr wParam, IntPtr lParam)
+    {
+        if (code >= 0 && (int)wParam == WM_MOUSEWHEEL)
+        {
+            try
+            {
+                var data = (MouseLowLevel)Marshal.PtrToStructure(lParam, typeof(MouseLowLevel));
+                if (OverIcon(data.pt.X, data.pt.Y))
+                {
+                    int delta = (short)((data.mouseData >> 16) & 0xFFFF);
+                    _onWheel(delta);
+                    return new IntPtr(1);   // прокрутка наша, панели задач её не отдаём
+                }
+            }
+            catch { }
+        }
+        return CallNextHookEx(_hook, code, wParam, lParam);
+    }
+
+    public void Dispose()
+    {
+        if (_hook != IntPtr.Zero) UnhookWindowsHookEx(_hook);
     }
 }
 

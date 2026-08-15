@@ -638,6 +638,32 @@ public class PlayerWindow : Window
     /// Берётся один раз, пока окно ещё скрыто: BitBlt области 440×150 — это
     /// пара миллисекунд, в цикле ничего не крутится.
     /// </summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string name);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+
+    /// <summary>
+    /// Гасит всплывающую панель трея. Окно открывается кликом по иконке, и эта
+    /// панель в этот момент ещё на экране — без неё снимок фона забирал бы её
+    /// внутрь стекла, и трей просвечивал бы сквозь окно.
+    /// </summary>
+    static void DismissTrayFlyout()
+    {
+        string[] classes = {
+            "NotifyIconOverflowWindow",              // Windows 10
+            "TopLevelWindowForOverflowXamlIsland",   // Windows 11
+            "Xaml_WindowedPopupClass"
+        };
+        bool hidden = false;
+        foreach (string cls in classes)
+        {
+            IntPtr h = FindWindow(cls, null);
+            if (h != IntPtr.Zero && IsWindowVisible(h)) { ShowWindow(h, 0 /* SW_HIDE */); hidden = true; }
+        }
+        // дать композитору перерисовать экран, иначе снимок ещё со старым кадром
+        if (hidden) System.Threading.Thread.Sleep(90);
+    }
+
     BitmapSource CaptureBehind()
     {
         try
@@ -686,6 +712,7 @@ public class PlayerWindow : Window
         Place();
 
         // строго до Show(), иначе окно снимет само себя
+        DismissTrayFlyout();
         var behind = CaptureBehind();
         _glassImage.Source = behind;
         _fallbackAcrylic = behind == null;
@@ -843,6 +870,10 @@ public class ProgressBarLite : Grid
         if (ActualWidth <= 0) return;
         double w = ActualWidth * _value;
         _fill.Width = w;
-        _knob.Margin = new Thickness(Math.Max(0, w - 4), 0, 0, 0);
+        // кружок держим целиком внутри полосы: на максимуме он иначе наполовину
+        // уезжает за край и выглядит обрезанным
+        double knob = _knob.Width;
+        double x = Math.Max(0, Math.Min(ActualWidth - knob, w - knob / 2));
+        _knob.Margin = new Thickness(x, 0, 0, 0);
     }
 }
