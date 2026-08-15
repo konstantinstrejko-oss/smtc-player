@@ -29,18 +29,42 @@ public class GlassShader : ShaderEffect
         RegisterPixelShaderSamplerProperty("Input", typeof(GlassShader), 0);
     public static readonly DependencyProperty NoiseProperty =
         RegisterPixelShaderSamplerProperty("Noise", typeof(GlassShader), 1);
+    // Тот же фон, но без размытия. В фаске стекло сжимает картинку в узкую
+    // полосу и показывает её резкой — из одного размытого входа получалось мыло.
+    public static readonly DependencyProperty SharpProperty =
+        RegisterPixelShaderSamplerProperty("Sharp", typeof(GlassShader), 2);
+
     public static readonly DependencyProperty AmountProperty =
         DependencyProperty.Register("Amount", typeof(double), typeof(GlassShader),
             new UIPropertyMetadata(0.02, PixelShaderConstantCallback(0)));
     public static readonly DependencyProperty PhaseProperty =
         DependencyProperty.Register("Phase", typeof(double), typeof(GlassShader),
             new UIPropertyMetadata(0.0, PixelShaderConstantCallback(1)));
-    // Размер карточки в точках. Без него кромку не задать в точках: шейдер видит
-    // только координаты 0..1, и полоса преломления получалась бы вчетверо шире
-    // по короткой стороне.
-    public static readonly DependencyProperty SizeProperty =
-        DependencyProperty.Register("Size", typeof(Point), typeof(GlassShader),
-            new UIPropertyMetadata(new Point(440, 150), PixelShaderConstantCallback(2)));
+    // Вся область эффекта в точках — карточка вместе с запасом снимка. Сузить её
+    // до карточки нельзя: ни ClipToBounds, ни явный Clip на элементе с эффектом
+    // области не ограничивают (проверено стендом). Поэтому геометрия карточки
+    // передаётся отдельным параметром.
+    public static readonly DependencyProperty AreaProperty =
+        DependencyProperty.Register("Area", typeof(Point), typeof(GlassShader),
+            new UIPropertyMetadata(new Point(488, 198), PixelShaderConstantCallback(2)));
+    public static readonly DependencyProperty RadiusProperty =
+        DependencyProperty.Register("Radius", typeof(double), typeof(GlassShader),
+            new UIPropertyMetadata(20.0, PixelShaderConstantCallback(3)));
+    /// <summary>Ширина фаски в точках — вся оптика живёт в ней.</summary>
+    public static readonly DependencyProperty BevelProperty =
+        DependencyProperty.Register("Bevel", typeof(double), typeof(GlassShader),
+            new UIPropertyMetadata(32.0, PixelShaderConstantCallback(4)));
+    /// <summary>Курсор в точках от центра карточки.</summary>
+    public static readonly DependencyProperty PointerProperty =
+        DependencyProperty.Register("Pointer", typeof(Point), typeof(GlassShader),
+            new UIPropertyMetadata(new Point(-9999, -9999), PixelShaderConstantCallback(5)));
+    /// <summary>Сила выпуклости под курсором, 0..1.</summary>
+    public static readonly DependencyProperty TouchProperty =
+        DependencyProperty.Register("Touch", typeof(double), typeof(GlassShader),
+            new UIPropertyMetadata(0.0, PixelShaderConstantCallback(6)));
+    public static readonly DependencyProperty CardProperty =
+        DependencyProperty.Register("Card", typeof(Point), typeof(GlassShader),
+            new UIPropertyMetadata(new Point(440, 150), PixelShaderConstantCallback(7)));
 
     public GlassShader(string shaderPath, string noisePath)
     {
@@ -57,16 +81,28 @@ public class GlassShader : ShaderEffect
         };
         UpdateShaderValue(InputProperty);
         UpdateShaderValue(NoiseProperty);
+        UpdateShaderValue(SharpProperty);
         UpdateShaderValue(AmountProperty);
         UpdateShaderValue(PhaseProperty);
-        UpdateShaderValue(SizeProperty);
+        UpdateShaderValue(AreaProperty);
+        UpdateShaderValue(RadiusProperty);
+        UpdateShaderValue(BevelProperty);
+        UpdateShaderValue(PointerProperty);
+        UpdateShaderValue(TouchProperty);
+        UpdateShaderValue(CardProperty);
     }
 
     public Brush Input { get { return (Brush)GetValue(InputProperty); } set { SetValue(InputProperty, value); } }
     public Brush Noise { get { return (Brush)GetValue(NoiseProperty); } set { SetValue(NoiseProperty, value); } }
+    public Brush Sharp { get { return (Brush)GetValue(SharpProperty); } set { SetValue(SharpProperty, value); } }
     public double Amount { get { return (double)GetValue(AmountProperty); } set { SetValue(AmountProperty, value); } }
     public double Phase { get { return (double)GetValue(PhaseProperty); } set { SetValue(PhaseProperty, value); } }
-    public Point Size { get { return (Point)GetValue(SizeProperty); } set { SetValue(SizeProperty, value); } }
+    public Point Area { get { return (Point)GetValue(AreaProperty); } set { SetValue(AreaProperty, value); } }
+    public double Radius { get { return (double)GetValue(RadiusProperty); } set { SetValue(RadiusProperty, value); } }
+    public double Bevel { get { return (double)GetValue(BevelProperty); } set { SetValue(BevelProperty, value); } }
+    public Point Pointer { get { return (Point)GetValue(PointerProperty); } set { SetValue(PointerProperty, value); } }
+    public double Touch { get { return (double)GetValue(TouchProperty); } set { SetValue(TouchProperty, value); } }
+    public Point Card { get { return (Point)GetValue(CardProperty); } set { SetValue(CardProperty, value); } }
 }
 
 // ---------------------------------------------------------------- окно
@@ -95,8 +131,15 @@ public class PlayerWindow : Window
     /// <summary>Запас снимка фона по краям, чтобы преломлению было что брать.</summary>
     const double GlassPad = 24;
 
+    /// <summary>
+    /// Поле вокруг карточки под тень. Окно на столько же больше самой карточки:
+    /// без тени панель выглядит наклейкой, а рисовать её некуда — за границами
+    /// окна композитор ничего не покажет.
+    /// </summary>
+    const double ShadowPad = 20;
+
     // слои и элементы
-    Border _glassHost, _tint;
+    Border _glassHost, _tint, _card, _shadow;
     Image _glassImage;
     GlassShader _shader;
     Image _cover;
@@ -108,6 +151,17 @@ public class PlayerWindow : Window
     Path _playIcon, _volWave;
     StackPanel _volumeBox;
     bool _muted;
+
+    // Перекраска содержимого под яркость фона. Каждый элемент при постройке
+    // кладёт сюда свою функцию — иначе при добавлении новой кнопки её легко
+    // забыть, и она останется белой на белом.
+    readonly System.Collections.Generic.List<Action<bool>> _skin =
+        new System.Collections.Generic.List<Action<bool>>();
+    // из этих регистраций живут только до следующей раскладки — кнопки
+    readonly System.Collections.Generic.List<Action<bool>> _skinLayout =
+        new System.Collections.Generic.List<Action<bool>>();
+    Border _veil;
+    bool _onLight;
 
     string _coverShown = "";
     bool _vertical;
@@ -138,6 +192,20 @@ public class PlayerWindow : Window
         ApplyLayout(Settings.Get("Layout", "horizontal") == "vertical");
 
         PlayerState.Changed += OnStateChanged;
+
+        // Жидкость: под курсором стекло вспучивается мягким куполом и оптика
+        // едет вместе с ним. Купол включается плавно — резкое появление читается
+        // как подёргивание, а не как отклик материала.
+        MouseMove += delegate (object s, MouseEventArgs e)
+        {
+            if (_shader == null) return;
+            var pt = e.GetPosition(_glassHost);
+            _shader.Pointer = new Point(pt.X - _glassHost.ActualWidth / 2,
+                                        pt.Y - _glassHost.ActualHeight / 2);
+        };
+        MouseEnter += delegate { AnimateTouch(1.0, 220); };
+        MouseLeave += delegate { AnimateTouch(0.0, 320); };
+
         // CloseOnBlur=0 оставляет окно висеть, пока его не закроют явно
         Deactivated += delegate
         {
@@ -147,6 +215,78 @@ public class PlayerWindow : Window
         };
         KeyDown += delegate (object s, KeyEventArgs e) { if (e.Key == Key.Escape) HideSmooth(); };
         Closed += delegate { PlayerState.Changed -= OnStateChanged; };
+    }
+
+    // ------------------------------------------------- контраст содержимого
+
+    /// <summary>
+    /// Стекло прозрачное, поэтому белый текст на светлом фоне не читается — как
+    /// не читается тёмный на тёмном. Содержимое переключается по фактической
+    /// яркости того, что лежит под окном: светлый фон — тёмная типографика и
+    /// светлая вуаль, тёмный — как было.
+    /// </summary>
+    void ApplyContrast(bool light)
+    {
+        _onLight = light;
+        foreach (var apply in _skin) apply(light);
+
+        if (_veil != null)
+            _veil.Background = light
+                ? new LinearGradientBrush(Color.FromArgb(70, 255, 255, 255), Color.FromArgb(30, 255, 255, 255), 90)
+                : new LinearGradientBrush(Color.FromArgb(20, 10, 10, 14), Color.FromArgb(48, 6, 6, 10), 90);
+
+        var shadow = _content != null ? _content.Effect as DropShadowEffect : null;
+        if (shadow != null)
+        {
+            shadow.Color = light ? Colors.White : Colors.Black;
+            shadow.Opacity = light ? 0.8 : 0.95;
+        }
+    }
+
+    Color Ink(bool light, byte alpha)
+    {
+        return light ? Color.FromArgb(alpha, 14, 14, 18) : Color.FromArgb(alpha, 255, 255, 255);
+    }
+
+    void ToneText(TextBlock t, byte alpha)
+    {
+        _skin.Add(delegate (bool light) { t.Foreground = new SolidColorBrush(Ink(light, alpha)); });
+    }
+
+    void ToneFill(System.Windows.Shapes.Shape s, byte alpha) { ToneFill(s, alpha, false); }
+
+    void ToneFill(System.Windows.Shapes.Shape s, byte alpha, bool perLayout)
+    {
+        Action<bool> apply = delegate (bool light) { s.Fill = new SolidColorBrush(Ink(light, alpha)); };
+        _skin.Add(apply);
+        if (perLayout) _skinLayout.Add(apply);
+        apply(_onLight);
+    }
+
+    void ToneStroke(System.Windows.Shapes.Shape s, byte alpha)
+    {
+        _skin.Add(delegate (bool light) { s.Stroke = new SolidColorBrush(Ink(light, alpha)); });
+    }
+
+    void ToneBorder(Border b, byte alpha)
+    {
+        _skin.Add(delegate (bool light) { b.Background = new SolidColorBrush(Ink(light, alpha)); });
+    }
+
+    /// <summary>Ширина и высота самой карточки: окно шире на поле под тень.</summary>
+    double CardW { get { return Math.Max(1, Width - ShadowPad * 2); } }
+    double CardH { get { return Math.Max(1, Height - ShadowPad * 2); } }
+
+    /// <summary>Плавно набирает и отпускает выпуклость стекла под курсором.</summary>
+    void AnimateTouch(double to, int ms)
+    {
+        if (_shader == null) return;
+        if (!Settings.GetBool("GlassTouch", true)) { _shader.Touch = 0; return; }
+        _shader.BeginAnimation(GlassShader.TouchProperty,
+            new DoubleAnimation(to, TimeSpan.FromMilliseconds(ms))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            });
     }
 
     // ------------------------------------------------------------ шрифты
@@ -173,6 +313,9 @@ public class PlayerWindow : Window
 
     void Build()
     {
+        // Окно больше карточки на ShadowPad с каждой стороны: в этом поле лежит
+        // тень. Всё остальное — стекло, содержимое, клип, захват фона — считает
+        // координаты от карточки, а не от окна.
         _root = new Grid();
 
         // 1. стекло: настоящий фон из-под окна, размытый и искажённый шейдером
@@ -191,11 +334,6 @@ public class PlayerWindow : Window
         // размывать по краям. Поля постоянные: недостающее у края экрана
         // дорисовывает сам захват.
         _glassImage.Margin = new Thickness(-GlassPad);
-        // ClipToBounds обязателен. Без него областью шейдера становится
-        // выпущенная за границы картинка, и координаты 0..1 внутри шейдера
-        // означают не карточку, а карточку с запасом — кромка съезжает, а у
-        // прижатого к краю экрана окна ещё и несимметрично. Размытие при этом не
-        // страдает: оно считается внутри, до обрезки.
         _glassHost = new Border { Child = _glassImage, ClipToBounds = true };
 
         string shaderPath = IOPath.Combine(ResourceDir, "Glass", "glass.ps");
@@ -206,17 +344,29 @@ public class PlayerWindow : Window
             {
                 _shader = new GlassShader(new Uri(shaderPath).AbsoluteUri, new Uri(noisePath).AbsoluteUri)
                 {
-                    Amount = Math.Max(0.0, Math.Min(0.2, Settings.GetInt("GlassAmount", 55) / 1000.0))
+                    Amount = Math.Max(0.0, Math.Min(0.2, Settings.GetInt("GlassAmount", 90) / 1000.0)),
+                    Radius = Radius,
+                    Bevel = Math.Max(8, Math.Min(60, Settings.GetInt("GlassBevel", 32)))
                 };
                 _glassHost.Effect = _shader;
             }
             catch { _shader = null; }   // без искажения, но со стеклом
         }
-        // размер карточки шейдер должен знать: кромка задана в точках
+        // геометрию карточки шейдер должен знать: вся оптика задана в точках
         _glassHost.SizeChanged += delegate
         {
             if (_shader == null) return;
-            _shader.Size = new Point(Math.Max(1, _glassHost.ActualWidth), Math.Max(1, _glassHost.ActualHeight));
+            double w = Math.Max(1, _glassHost.ActualWidth), h = Math.Max(1, _glassHost.ActualHeight);
+            _shader.Card = new Point(w, h);
+            _shader.Area = new Point(w + GlassPad * 2, h + GlassPad * 2);
+
+            // Вьюпорт резкого входа считается от размеров карточки — при смене
+            // раскладки он обязан пересчитаться, иначе резкая копия ляжет со
+            // сдвигом относительно размытой.
+            var brush = _shader.Sharp as ImageBrush;
+            if (brush != null)
+                brush.Viewport = new Rect(-GlassPad / w, -GlassPad / h,
+                                          (w + GlassPad * 2) / w, (h + GlassPad * 2) / h);
         };
         _root.Children.Add(_glassHost);
 
@@ -224,14 +374,14 @@ public class PlayerWindow : Window
         _tint = new Border { Background = new SolidColorBrush(Color.FromArgb(TintAlpha, 90, 110, 170)) };
         _root.Children.Add(_tint);
 
-        // 3. лёгкая вуаль. Раньше здесь было плотное затемнение ради читаемости
-        // текста — теперь текст держится собственной тенью, и фон можно оставить
-        // почти нетронутым.
-        _root.Children.Add(new Border
+        // 3. вуаль. Держится минимальной: плотные слои поверх съедают всю оптику
+        // фаски, а читаемость текста обеспечивает его собственная тень.
+        _veil = new Border
         {
             Background = new LinearGradientBrush(
-                Color.FromArgb(56, 10, 10, 14), Color.FromArgb(112, 6, 6, 10), 90)
-        });
+                Color.FromArgb(20, 10, 10, 14), Color.FromArgb(48, 6, 6, 10), 90)
+        };
+        _root.Children.Add(_veil);
 
         // 3. содержимое. Тень под ним заменяет плотное затемнение всей карточки:
         // текст читается на любом фоне, а сам фон остаётся видимым.
@@ -248,16 +398,21 @@ public class PlayerWindow : Window
         };
         BuildContent();
         _root.Children.Add(_content);
+        ApplyContrast(false);   // стартуем в тёмном исполнении, замер поправит
 
-        // 4. фаска — как inset-блик в CSS
-        _root.Children.Add(new Border
-        {
-            CornerRadius = new CornerRadius(Radius),
-            BorderThickness = new Thickness(1.2),
-            IsHitTestVisible = false,
-            BorderBrush = new LinearGradientBrush(
-                Color.FromArgb(120, 255, 255, 255), Color.FromArgb(25, 255, 255, 255), 90)
-        });
+        // Нарисованной фаски здесь больше нет: грань, блик и световую нить по
+        // кромке считает шейдер из настоящей нормали поверхности. Рамка поверх
+        // спорила с ними и выдавала карточку за наклейку. Если шейдер не
+        // загрузился, рамку возвращаем — иначе край вовсе ничем не обозначен.
+        if (_shader == null)
+            _root.Children.Add(new Border
+            {
+                CornerRadius = new CornerRadius(Radius),
+                BorderThickness = new Thickness(1.2),
+                IsHitTestVisible = false,
+                BorderBrush = new LinearGradientBrush(
+                    Color.FromArgb(120, 255, 255, 255), Color.FromArgb(25, 255, 255, 255), 90)
+            });
 
         // Системное скругление DWM даёт всего ~8 px и радиус не настраивается,
         // поэтому режем содержимое сами. Углы при этом остаются прозрачными:
@@ -270,7 +425,26 @@ public class PlayerWindow : Window
                 new Rect(0, 0, _root.ActualWidth, _root.ActualHeight), Radius, Radius);
         };
 
-        Content = _root;
+        // Тень отдельным слоем под карточкой, а не эффектом на ней: содержимое
+        // карточки меняется каждый кадр вместе с фоном, и тень пересчитывалась бы
+        // столько же раз. Здесь она статична и уходит в кэш растром.
+        _shadow = new Border
+        {
+            Margin = new Thickness(ShadowPad, ShadowPad + 5, ShadowPad, ShadowPad - 5),
+            CornerRadius = new CornerRadius(Radius),
+            Background = new SolidColorBrush(Color.FromArgb(96, 0, 0, 0)),
+            Effect = new BlurEffect { Radius = 16, KernelType = KernelType.Gaussian },
+            CacheMode = new BitmapCache(),
+            IsHitTestVisible = false,
+            Opacity = 0
+        };
+
+        _card = new Border { Margin = new Thickness(ShadowPad), Child = _root };
+
+        var shell = new Grid();
+        shell.Children.Add(_shadow);
+        shell.Children.Add(_card);
+        Content = shell;
     }
 
     void BuildContent()
@@ -298,6 +472,7 @@ public class PlayerWindow : Window
             Foreground = Brushes.White,
             TextWrapping = TextWrapping.NoWrap
         };
+        ToneText(_title, 255);
         _titleClip = new Canvas { ClipToBounds = true, Height = 21 };
         _titleClip.Children.Add(_title);
 
@@ -310,16 +485,19 @@ public class PlayerWindow : Window
             Foreground = new SolidColorBrush(Color.FromArgb(175, 255, 255, 255)),
             TextTrimming = TextTrimming.CharacterEllipsis
         };
+        ToneText(_artist, 190);
 
         _posText = Mono();
         _durText = Mono();
         _durText.HorizontalAlignment = HorizontalAlignment.Right;
 
         _progress = new ProgressBarLite(3.5);
+        _skin.Add(_progress.SetLight);
         _progress.Seek += OnSeek;
         _progress.DragState += delegate (bool on) { _draggingSeek = on; };
 
         _volume = new ProgressBarLite(3.0) { Width = 78, Live = true };
+        _skin.Add(_volume.SetLight);
         _volume.Seek += delegate (double v)
         {
             AppVolume.Set(PlayerState.AppId, (float)v);
@@ -337,11 +515,13 @@ public class PlayerWindow : Window
         // нуле подменяются перечёркиванием — как принято во всех плеерах.
         var speaker = new Grid { Width = 17, Height = 12, Margin = new Thickness(0, 0, 7, 0),
                                  VerticalAlignment = VerticalAlignment.Center };
-        speaker.Children.Add(new Path
+        var speakerBody = new Path
         {
             Data = Geometry.Parse("M0,4 L3,4 L7,0 L7,12 L3,8 L0,8 Z"),
             Fill = new SolidColorBrush(Color.FromArgb(200, 255, 255, 255))
-        });
+        };
+        ToneFill(speakerBody, 210);
+        speaker.Children.Add(speakerBody);
         _volWave = new Path
         {
             Stroke = new SolidColorBrush(Color.FromArgb(200, 255, 255, 255)),
@@ -349,6 +529,7 @@ public class PlayerWindow : Window
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round
         };
+        ToneStroke(_volWave, 210);
         speaker.Children.Add(_volWave);
         SetMuted(false);
 
@@ -359,12 +540,14 @@ public class PlayerWindow : Window
 
     TextBlock Mono()
     {
-        return new TextBlock
+        var t = new TextBlock
         {
             FontFamily = _display,
             FontSize = 10,
             Foreground = new SolidColorBrush(Color.FromArgb(140, 255, 255, 255))
         };
+        ToneText(t, 165);
+        return t;
     }
 
     // ------------------------------------------------------------ кнопки
@@ -384,6 +567,7 @@ public class PlayerWindow : Window
             Fill = Brushes.White,
             Data = Geometry.Parse("M0,0 L13,7 L0,14 Z")
         };
+        ToneFill(_playIcon, 255, true);
         panel.Children.Add(Wrap(_playIcon, 1.0 * scale, delegate { PlayerState.Send("playpause"); }));
         panel.Children.Add(IconButton("M0,0 L8,6 L0,12 Z M8.4,0 L10,0 L10,12 L8.4,12 Z", 0.82 * scale,
                                       delegate { PlayerState.Send("next"); }));
@@ -392,7 +576,9 @@ public class PlayerWindow : Window
 
     UIElement IconButton(string geometry, double scale, Action click)
     {
-        return Wrap(new Path { Fill = Brushes.White, Data = Geometry.Parse(geometry) }, scale, click);
+        var icon = new Path { Fill = Brushes.White, Data = Geometry.Parse(geometry) };
+        ToneFill(icon, 235, true);
+        return Wrap(icon, scale, click);
     }
 
     UIElement Wrap(Path icon, double scale, Action click)
@@ -436,11 +622,46 @@ public class PlayerWindow : Window
         _content.ColumnDefinitions.Clear();
         _content.RowDefinitions.Clear();
 
+        // Очистки _content мало: обложка, ползунки и время лежат не прямо в нём,
+        // а во вложенных панелях, и после Clear остаются логическими детьми этих
+        // панелей. Повторная раскладка тогда падает с «элемент уже является
+        // логическим дочерним для другого» и уносит процесс целиком — до этой
+        // строки переключение вида на живом окне работало ровно один раз.
+        Detach(_coverFrame);
+        Detach(_titleClip);
+        Detach(_artist);
+        Detach(_progress);
+        Detach(_posText);
+        Detach(_durText);
+        Detach(_volumeBox);
+
+        // Кнопки собираются заново на каждую раскладку, поэтому их перекраску
+        // надо снимать с учёта: иначе список растёт, а вместе с ним и мусор из
+        // элементов, которых давно нет в дереве.
+        foreach (var stale in _skinLayout) _skin.Remove(stale);
+        _skinLayout.Clear();
+
         if (vertical) LayoutVertical(); else LayoutHorizontal();
 
-        Width = vertical ? 300 : 440;
-        Height = vertical ? 400 : 150;
+        Width = (vertical ? 300 : 440) + ShadowPad * 2;
+        Height = (vertical ? 400 : 150) + ShadowPad * 2;
         Place();
+    }
+
+    /// <summary>Снимает элемент с текущего родителя, каким бы тот ни был.</summary>
+    static void Detach(FrameworkElement el)
+    {
+        if (el == null) return;
+        var parent = el.Parent;
+
+        var panel = parent as Panel;
+        if (panel != null) { panel.Children.Remove(el); return; }
+
+        var decorator = parent as Decorator;
+        if (decorator != null && decorator.Child == el) { decorator.Child = null; return; }
+
+        var holder = parent as ContentControl;
+        if (holder != null && holder.Content == el) holder.Content = null;
     }
 
     void LayoutHorizontal()
@@ -805,10 +1026,10 @@ public class PlayerWindow : Window
             // границей карточки, иначе по периметру стекло редеет и сквозь него
             // проступает тинт полосой.
             int pad = (int)Math.Round(GlassPad * scale);
-            int wx = (int)Math.Round(Left * scale);
-            int wy = (int)Math.Round(Top * scale);
-            int ww = (int)Math.Round(Width * scale);
-            int wh = (int)Math.Round(Height * scale);
+            int wx = (int)Math.Round((Left + ShadowPad) * scale);
+            int wy = (int)Math.Round((Top + ShadowPad) * scale);
+            int ww = (int)Math.Round(CardW * scale);
+            int wh = (int)Math.Round(CardH * scale);
 
             // Размер снимка постоянный — окно плюс запас с четырёх сторон. Раньше
             // он обрезался краем экрана, и картинка ложилась в окно со сдвигом.
@@ -858,6 +1079,23 @@ public class PlayerWindow : Window
                 _live = new WriteableBitmap(cw, ch, 96, 96, PixelFormats.Pbgra32, null);
                 _shotW = cw; _shotH = ch;
                 _glassImage.Source = _live;
+
+                // Второй вход шейдера — тот же снимок без размытия. Вьюпорт
+                // выносит его за границы карточки ровно на запас, чтобы резкая
+                // и размытая версии лежали в одних координатах.
+                if (_shader != null)
+                {
+                    double gw = Math.Max(1, _glassHost.ActualWidth > 0 ? _glassHost.ActualWidth : Width);
+                    double gh = Math.Max(1, _glassHost.ActualHeight > 0 ? _glassHost.ActualHeight : Height);
+                    _shader.Sharp = new ImageBrush(_live)
+                    {
+                        Stretch = Stretch.Fill,
+                        TileMode = TileMode.None,
+                        ViewportUnits = BrushMappingMode.RelativeToBoundingBox,
+                        Viewport = new Rect(-GlassPad / gw, -GlassPad / gh,
+                                            (gw + GlassPad * 2) / gw, (gh + GlassPad * 2) / gh)
+                    };
+                }
             }
 
             using (var g = D.Graphics.FromImage(_shot))
@@ -910,11 +1148,48 @@ public class PlayerWindow : Window
             try
             {
                 _live.WritePixels(new Int32Rect(0, 0, w2, h2), data.Scan0, data.Stride * h2, data.Stride);
+                TrackBrightness(data, w2, h2);
                 if (Settings.GetBool("Debug", false)) LogFingerprint(data, w2, h2);
             }
             finally { _shot.UnlockBits(data); }
         }
         catch { }
+    }
+
+    DateTime _brightnessAt = DateTime.MinValue;
+
+    /// <summary>
+    /// Средняя яркость того, что лежит под окном. Считается по разреженной сетке
+    /// пикселей уже снятого кадра — отдельный проход по экрану ради этого не
+    /// нужен. Переключение с гистерезисом: на границе содержимое иначе моргало
+    /// бы между тёмным и светлым исполнением.
+    /// </summary>
+    void TrackBrightness(D.Imaging.BitmapData data, int w, int h)
+    {
+        if ((DateTime.UtcNow - _brightnessAt).TotalMilliseconds < 350) return;
+        _brightnessAt = DateTime.UtcNow;
+
+        long sum = 0;
+        int n = 0;
+        unchecked
+        {
+            for (int y = 6; y < h; y += 9)
+            {
+                IntPtr row = (IntPtr)(data.Scan0.ToInt64() + (long)y * data.Stride);
+                for (int x = 6; x < w; x += 9)
+                {
+                    int c = Marshal.ReadInt32(row, x * 4);
+                    int b = c & 0xFF, g = (c >> 8) & 0xFF, r = (c >> 16) & 0xFF;
+                    sum += (r * 77 + g * 151 + b * 28) >> 8;
+                    n++;
+                }
+            }
+        }
+        if (n == 0) return;
+
+        double luma = (double)sum / n;
+        bool light = _onLight ? luma > 118 : luma > 148;
+        if (light != _onLight) ApplyContrast(light);
     }
 
     DateTime _fingerprintAt = DateTime.MinValue;
@@ -1008,8 +1283,8 @@ public class PlayerWindow : Window
     void Place()
     {
         var wa = SystemParameters.WorkArea;
-        Left = wa.Right - Width - 14;
-        Top = wa.Bottom - Height - 14;
+        Left = wa.Right - Width + ShadowPad - 14;
+        Top = wa.Bottom - Height + ShadowPad - 14;
     }
 
     /// <summary>
@@ -1081,8 +1356,15 @@ public class PlayerWindow : Window
     /// </summary>
     void AnimateReveal(bool opening)
     {
-        double w = ActualWidth > 0 ? ActualWidth : Width;
-        double h = ActualHeight > 0 ? ActualHeight : Height;
+        // размеры карточки, а не окна: окно шире на поле под тень
+        double w = _root.ActualWidth > 0 ? _root.ActualWidth : CardW;
+        double h = _root.ActualHeight > 0 ? _root.ActualHeight : CardH;
+
+        // тень проявляется вместе с карточкой и уходит чуть раньше неё
+        if (_shadow != null)
+            _shadow.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(opening ? 1.0 : 0.0,
+                    TimeSpan.FromMilliseconds(opening ? 300 : 170)));
 
         var clip = _root.Clip as RectangleGeometry;
         if (clip == null)
@@ -1168,6 +1450,17 @@ public class ProgressBarLite : Grid
     public bool Live;
 
     DateTime _lastLive = DateTime.MinValue;
+
+    /// <summary>Перекраска под светлый фон — см. ApplyContrast у окна.</summary>
+    public void SetLight(bool light)
+    {
+        _track.Background = new SolidColorBrush(light
+            ? Color.FromArgb(60, 14, 14, 18) : Color.FromArgb(55, 255, 255, 255));
+        _fill.Background = new SolidColorBrush(light
+            ? Color.FromArgb(225, 14, 14, 18) : Color.FromArgb(230, 255, 255, 255));
+        _knob.Fill = new SolidColorBrush(light
+            ? Color.FromArgb(255, 14, 14, 18) : Colors.White);
+    }
 
     public ProgressBarLite(double thickness)
     {
