@@ -14,6 +14,7 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using System.Runtime.InteropServices;
 using D = System.Drawing;
 // System.Windows.Shapes.Path — это фигура, а не путь к файлу; развести их явно
@@ -73,6 +74,9 @@ public class PlayerWindow : Window
 
     public static string ResourceDir = "";
 
+    /// <summary>Радиус скругления окна.</summary>
+    const double Radius = 20;
+
     // слои и элементы
     Border _glassHost, _tint;
     Image _glassImage;
@@ -90,6 +94,11 @@ public class PlayerWindow : Window
     string _coverShown = "";
     bool _vertical;
     bool _draggingSeek;
+    bool _draggingVolume;
+    DateTime _volumeTouched = DateTime.MinValue;
+    bool _closing;
+    bool _warmed;
+    bool _wantVisible;
     bool _fallbackAcrylic;
     D.Color _accent = D.Color.FromArgb(255, 90, 110, 170);
 
@@ -111,7 +120,13 @@ public class PlayerWindow : Window
         ApplyLayout(Settings.Get("Layout", "horizontal") == "vertical");
 
         PlayerState.Changed += OnStateChanged;
-        Deactivated += delegate { if (!_draggingSeek) HideSmooth(); };
+        // CloseOnBlur=0 оставляет окно висеть, пока его не закроют явно
+        Deactivated += delegate
+        {
+            if (_draggingSeek || _draggingVolume) return;
+            if (!Settings.GetBool("CloseOnBlur", true)) return;
+            HideSmooth();
+        };
         KeyDown += delegate (object s, KeyEventArgs e) { if (e.Key == Key.Escape) HideSmooth(); };
         Closed += delegate { PlayerState.Changed -= OnStateChanged; };
     }
@@ -185,12 +200,23 @@ public class PlayerWindow : Window
         // 4. фаска — как inset-блик в CSS
         _root.Children.Add(new Border
         {
-            CornerRadius = new CornerRadius(8),
+            CornerRadius = new CornerRadius(Radius),
             BorderThickness = new Thickness(1.2),
             IsHitTestVisible = false,
             BorderBrush = new LinearGradientBrush(
                 Color.FromArgb(120, 255, 255, 255), Color.FromArgb(25, 255, 255, 255), 90)
         });
+
+        // Системное скругление DWM даёт всего ~8 px и радиус не настраивается,
+        // поэтому режем содержимое сами. Углы при этом остаются прозрачными:
+        // фон окна композитор не рисует, а WPF за пределы Clip не заходит.
+        _root.SizeChanged += delegate
+        {
+            // во время показа Clip анимируется — перебивать его нельзя
+            if (IsVisible) return;
+            _root.Clip = new RectangleGeometry(
+                new Rect(0, 0, _root.ActualWidth, _root.ActualHeight), Radius, Radius);
+        };
 
         Content = _root;
     }
@@ -241,8 +267,19 @@ public class PlayerWindow : Window
         _progress.Seek += OnSeek;
         _progress.DragState += delegate (bool on) { _draggingSeek = on; };
 
-        _volume = new ProgressBarLite(3.0) { Width = 78 };
-        _volume.Seek += delegate (double v) { AppVolume.Set(PlayerState.AppId, (float)v); UpdateVolume(); };
+        _volume = new ProgressBarLite(3.0) { Width = 78, Live = true };
+        _volume.Seek += delegate (double v)
+        {
+            AppVolume.Set(PlayerState.AppId, (float)v);
+            // система применяет громкость не мгновенно; пока она догоняет,
+            // читать её обратно нельзя — ползунок отскакивал бы назад
+            _volumeTouched = DateTime.UtcNow;
+        };
+        _volume.DragState += delegate (bool on)
+        {
+            _draggingVolume = on;
+            _volumeTouched = DateTime.UtcNow;
+        };
 
         // Корпус динамика и «волны» разведены: волны рисуются обводкой, и при
         // нуле подменяются перечёркиванием — как принято во всех плеерах.
@@ -466,9 +503,27 @@ public class PlayerWindow : Window
         HwndSource.FromHwnd(h).CompositionTarget.BackgroundColor = Colors.Transparent;
 
         int dark = 1; DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, 4);
-        int round = 2; DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, ref round, 4);
-        // Акрил включается только как запасной путь: обычно фон рисуем сами
-        // снимком, и системное размытие под ним всё равно не видно.
+        // своё скругление больше системного, так что системное только мешало бы
+        int round = 1 /* DONOTROUND */; DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, ref round, 4);
+
+        // Без этого всё, что лежит вне Clip, композитор заливает чёрным — и
+        // раскрытие карточки идёт из чёрного прямоугольника. С прозрачным
+        // градиентом непрорисованные области становятся по-настоящему сквозными.
+        SetAccent(h, 2 /* ACCENT_ENABLE_TRANSPARENTGRADIENT */, 0);
+    }
+
+    static bool SetAccent(IntPtr hwnd, int state, int gradientColor)
+    {
+        var policy = new ACCENTPOLICY { State = state, Flags = 2, GradientColor = gradientColor, AnimationId = 0 };
+        int size = Marshal.SizeOf(policy);
+        IntPtr p = Marshal.AllocHGlobal(size);
+        try
+        {
+            Marshal.StructureToPtr(policy, p, false);
+            var data = new WCD { Attribute = WCA_ACCENT_POLICY, Data = p, SizeOfData = size };
+            return SetWindowCompositionAttribute(hwnd, ref data) != 0;
+        }
+        finally { Marshal.FreeHGlobal(p); }
     }
 
     /// <summary>Тинт стекла — доминирующий цвет обложки. Стекло «дышит» с треком.</summary>
@@ -479,27 +534,11 @@ public class PlayerWindow : Window
 
         // порядок байтов политики: AABBGGRR
         int tint = (0x50 << 24) | (_accent.B << 16) | (_accent.G << 8) | _accent.R;
-        var policy = new ACCENTPOLICY
+        if (!SetAccent(h, ACCENT_ENABLE_ACRYLICBLURBEHIND, tint))
         {
-            State = ACCENT_ENABLE_ACRYLICBLURBEHIND,
-            Flags = 2,
-            GradientColor = tint,
-            AnimationId = 0
-        };
-
-        int size = Marshal.SizeOf(policy);
-        IntPtr p = Marshal.AllocHGlobal(size);
-        try
-        {
-            Marshal.StructureToPtr(policy, p, false);
-            var data = new WCD { Attribute = WCA_ACCENT_POLICY, Data = p, SizeOfData = size };
-            if (SetWindowCompositionAttribute(h, ref data) == 0)
-            {
-                // API не сработал — рисуем сплошной тёмный фон, всё остальное живо
-                _root.Background = new SolidColorBrush(Color.FromArgb(230, 20, 20, 24));
-            }
+            // API не сработал — рисуем сплошной тёмный фон, всё остальное живо
+            _root.Background = new SolidColorBrush(Color.FromArgb(230, 20, 20, 24));
         }
-        finally { Marshal.FreeHGlobal(p); }
     }
 
     // ------------------------------------------------------------ данные
@@ -539,10 +578,20 @@ public class PlayerWindow : Window
 
     void UpdateVolume()
     {
+        // пока тащат ползунок и ещё полсекунды после — значение не трогаем
+        if (_draggingVolume || (DateTime.UtcNow - _volumeTouched).TotalMilliseconds < 500)
+        {
+            SetMuted(_volume.Value < 0.005);
+            return;
+        }
+
         float v = AppVolume.Get(PlayerState.AppId);
         if (v < 0) { _volumeBox.Visibility = Visibility.Collapsed; return; }
         _volumeBox.Visibility = Visibility.Visible;
-        _volume.Value = v;
+
+        // мелкую разницу игнорируем: система округляет громкость по-своему,
+        // и от этих долей процента ползунок дёргался бы на каждом такте
+        if (Math.Abs(_volume.Value - v) > 0.004) _volume.Value = v;
         SetMuted(v < 0.005f);
     }
 
@@ -664,39 +713,129 @@ public class PlayerWindow : Window
         if (hidden) System.Threading.Thread.Sleep(90);
     }
 
-    BitmapSource CaptureBehind()
+    [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr h, uint affinity);
+
+    const uint WDA_NONE = 0;
+    const uint WDA_EXCLUDEFROMCAPTURE = 0x11;
+
+    D.Bitmap _shot;
+    WriteableBitmap _live;
+    DispatcherTimer _glassTimer;
+    int _shotW, _shotH;
+
+    double DpiScale
+    {
+        get
+        {
+            try { using (var probe = D.Graphics.FromHwnd(IntPtr.Zero)) return probe.DpiX / 96.0; }
+            catch { return 1.0; }
+        }
+    }
+
+    /// <summary>
+    /// Снимок того, что лежит под окном. Пиксели пишутся в одну и ту же
+    /// WriteableBitmap: пересоздавать картинку на каждом кадре слишком дорого.
+    /// </summary>
+    void CaptureBehind()
     {
         try
         {
-            double scale = 1.0;
-            using (var probe = D.Graphics.FromHwnd(IntPtr.Zero)) scale = probe.DpiX / 96.0;
-
+            double scale = DpiScale;
             int x = (int)Math.Round(Left * scale);
             int y = (int)Math.Round(Top * scale);
             int w = (int)Math.Round(Width * scale);
             int h = (int)Math.Round(Height * scale);
-            if (w < 2 || h < 2) return null;
+            if (w < 2 || h < 2) return;
 
-            using (var bmp = new D.Bitmap(w, h, D.Imaging.PixelFormat.Format32bppArgb))
+            if (_shot == null || _shotW != w || _shotH != h)
             {
-                using (var g = D.Graphics.FromImage(bmp))
-                    g.CopyFromScreen(x, y, 0, 0, new D.Size(w, h), D.CopyPixelOperation.SourceCopy);
-
-                using (var ms = new MemoryStream())
-                {
-                    bmp.Save(ms, D.Imaging.ImageFormat.Bmp);
-                    ms.Position = 0;
-                    var img = new BitmapImage();
-                    img.BeginInit();
-                    img.StreamSource = ms;
-                    img.CacheOption = BitmapCacheOption.OnLoad;
-                    img.EndInit();
-                    img.Freeze();
-                    return img;
-                }
+                if (_shot != null) _shot.Dispose();
+                _shot = new D.Bitmap(w, h, D.Imaging.PixelFormat.Format32bppPArgb);
+                _live = new WriteableBitmap(w, h, 96, 96, PixelFormats.Pbgra32, null);
+                _shotW = w; _shotH = h;
+                _glassImage.Source = _live;
             }
+
+            using (var g = D.Graphics.FromImage(_shot))
+                g.CopyFromScreen(x, y, 0, 0, new D.Size(w, h), D.CopyPixelOperation.SourceCopy);
+
+            var rect = new D.Rectangle(0, 0, w, h);
+            var data = _shot.LockBits(rect, D.Imaging.ImageLockMode.ReadOnly, D.Imaging.PixelFormat.Format32bppPArgb);
+            try
+            {
+                _live.WritePixels(new Int32Rect(0, 0, w, h), data.Scan0, data.Stride * h, data.Stride);
+                if (Settings.GetBool("Debug", false)) LogFingerprint(data, w, h);
+            }
+            finally { _shot.UnlockBits(data); }
         }
-        catch { return null; }
+        catch { }
+    }
+
+    DateTime _fingerprintAt = DateTime.MinValue;
+    int _capturedFrames;
+
+    /// <summary>
+    /// Отпечаток снимка — доказательство, что фон действительно обновляется:
+    /// само окно исключено из захвата, поэтому увидеть его скриншотом нельзя.
+    /// </summary>
+    void LogFingerprint(D.Imaging.BitmapData data, int w, int h)
+    {
+        _capturedFrames++;
+        if ((DateTime.UtcNow - _fingerprintAt).TotalMilliseconds < 1000) return;
+        _fingerprintAt = DateTime.UtcNow;
+
+        unchecked
+        {
+            long sum = 0;
+            for (int y = 4; y < h; y += 17)
+            {
+                IntPtr row = (IntPtr)(data.Scan0.ToInt64() + (long)y * data.Stride);
+                for (int x = 4; x < w; x += 17)
+                    sum += Marshal.ReadInt32(row, x * 4) & 0x00FFFFFF;
+            }
+            Diag.Log(string.Format("стекло: кадров {0}, отпечаток фона {1}", _capturedFrames, sum));
+        }
+    }
+
+    /// <summary>
+    /// Живое стекло: фон перечитывается по таймеру, пока окно открыто. Чтобы
+    /// захват не снимал сам себя (иначе получается бесконечный «туннель»), окно
+    /// исключается из захвата средствами системы.
+    /// </summary>
+    void StartLiveGlass()
+    {
+        bool live = Settings.GetBool("GlassLive", true);
+        IntPtr h = new WindowInteropHelper(this).Handle;
+
+        if (!live)
+        {
+            SetWindowDisplayAffinity(h, WDA_NONE);
+            return;
+        }
+
+        // Требует Windows 10 2004+. Если не поддерживается — остаёмся на
+        // единственном снимке, иначе окно поймает само себя.
+        if (!SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE))
+        {
+            Diag.Log("живое стекло недоступно: окно не исключается из захвата");
+            return;
+        }
+
+        if (_glassTimer == null)
+        {
+            int fps = Math.Max(5, Math.Min(60, Settings.GetInt("GlassFps", 25)));
+            _glassTimer = new DispatcherTimer(DispatcherPriority.Render)
+            {
+                Interval = TimeSpan.FromMilliseconds(1000.0 / fps)
+            };
+            _glassTimer.Tick += delegate { if (IsVisible) CaptureBehind(); };
+        }
+        _glassTimer.Start();
+    }
+
+    void StopLiveGlass()
+    {
+        if (_glassTimer != null) _glassTimer.Stop();
     }
 
     /// <summary>Ставит окно в угол рабочей области — там же, где трей.</summary>
@@ -707,46 +846,133 @@ public class PlayerWindow : Window
         Top = wa.Bottom - Height - 14;
     }
 
+    /// <summary>
+    /// Первый показ окна давал вспышку чёрным: HWND уже на экране, а WPF ещё не
+    /// нарисовал ни одного кадра. Поэтому окно один раз поднимается далеко за
+    /// пределами экрана и прячется сразу после первой отрисовки.
+    /// </summary>
+    public void Prewarm()
+    {
+        if (_warmed) return;
+        _warmed = true;
+
+        Left = -30000;
+        Top = -30000;
+        Show();
+
+        ContentRendered += delegate
+        {
+            // если за время прогрева окно уже попросили показать — не мешаем
+            if (_wantVisible) return;
+            Hide();
+            Place();
+        };
+    }
+
     public void ShowSmooth()
     {
+        _wantVisible = true;
         Place();
 
-        // строго до Show(), иначе окно снимет само себя
+        // первый кадр — строго до Show(), иначе окно снимет само себя
         DismissTrayFlyout();
-        var behind = CaptureBehind();
-        _glassImage.Source = behind;
-        _fallbackAcrylic = behind == null;
+        CaptureBehind();
+        _fallbackAcrylic = _live == null;
 
         Show();
         Activate();
+        StartLiveGlass();
         if (_fallbackAcrylic) ApplyAccent();   // не сняли фон — пусть размывает DWM
         Apply();
 
-        _content.Opacity = 0;
-        var slide = new TranslateTransform(0, 14);
-        _root.RenderTransform = slide;
+        // Прозрачность у корня анимировать нельзя: под ним непрозрачный фон
+        // окна, и полупрозрачная карточка проявлялась бы из черноты. Прозрачно
+        // только то, чего WPF не рисует вовсе, — поэтому раскрываем сам Clip.
+        AnimateReveal(true);
 
-        _content.BeginAnimation(OpacityProperty,
-            new DoubleAnimation(1, TimeSpan.FromMilliseconds(190)));
-        slide.BeginAnimation(TranslateTransform.YProperty,
-            new DoubleAnimation(0, TimeSpan.FromMilliseconds(340))
-            {
-                EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.7 }
-            });
+        // содержимое подтягивается чуть позже карточки: под ним уже лежит
+        // непрозрачное стекло, так что его прозрачность безопасна
+        _content.Opacity = 0;
+        _content.BeginAnimation(OpacityProperty, new DoubleAnimation(1, TimeSpan.FromMilliseconds(240))
+        {
+            BeginTime = TimeSpan.FromMilliseconds(110),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        });
 
         if (_shader != null)
             _shader.BeginAnimation(GlassShader.PhaseProperty,
                 new DoubleAnimation(0, 24, TimeSpan.FromSeconds(30)) { RepeatBehavior = RepeatBehavior.Forever });
     }
 
+    /// <summary>
+    /// Раскрытие и схлопывание карточки: анимируется прямоугольник Clip, растущий
+    /// из угла у трея. Одновременно содержимое чуть подрастает — от этого движение
+    /// читается как «карточка вылетает», а не «прямоугольник расширяется».
+    /// </summary>
+    void AnimateReveal(bool opening)
+    {
+        double w = ActualWidth > 0 ? ActualWidth : Width;
+        double h = ActualHeight > 0 ? ActualHeight : Height;
+
+        var clip = _root.Clip as RectangleGeometry;
+        if (clip == null)
+        {
+            clip = new RectangleGeometry(new Rect(0, 0, w, h), Radius, Radius);
+            _root.Clip = clip;
+        }
+
+        // сжатое состояние: узкая полоса у правого нижнего угла — там трей
+        var small = new Rect(w * 0.30, h * 0.42, w * 0.70, h * 0.58);
+        var full = new Rect(0, 0, w, h);
+
+        var span = TimeSpan.FromMilliseconds(opening ? 380 : 210);
+        IEasingFunction ease = opening
+            ? (IEasingFunction)new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.25 }
+            : new CubicEase { EasingMode = EasingMode.EaseIn };
+
+        if (opening) clip.Rect = small;
+        var rect = new RectAnimation(opening ? small : full, opening ? full : small, span)
+        {
+            EasingFunction = ease
+        };
+
+        var scale = _root.RenderTransform as ScaleTransform;
+        if (scale == null)
+        {
+            scale = new ScaleTransform(1, 1);
+            _root.RenderTransformOrigin = new Point(0.85, 1.0);
+            _root.RenderTransform = scale;
+        }
+        var grow = new DoubleAnimation(opening ? 0.97 : 1.0, opening ? 1.0 : 0.98, span) { EasingFunction = ease };
+        scale.BeginAnimation(ScaleTransform.ScaleXProperty, grow);
+        scale.BeginAnimation(ScaleTransform.ScaleYProperty, grow);
+
+        if (!opening)
+        {
+            rect.Completed += delegate
+            {
+                _closing = false;
+                _wantVisible = false;
+                Hide();
+                clip.Rect = new Rect(0, 0, w, h);   // вернуть к полному на будущее
+            };
+        }
+        clip.BeginAnimation(RectangleGeometry.RectProperty, rect);
+    }
+
     public void HideSmooth()
     {
-        if (!IsVisible) return;
+        if (!IsVisible || _closing) return;
+        _closing = true;
+        StopLiveGlass();
         if (_shader != null) _shader.BeginAnimation(GlassShader.PhaseProperty, null);
 
-        var fade = new DoubleAnimation(0, TimeSpan.FromMilliseconds(130));
-        fade.Completed += delegate { Hide(); };
-        _content.BeginAnimation(OpacityProperty, fade);
+        _content.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(0, TimeSpan.FromMilliseconds(150))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+            });
+        AnimateReveal(false);
     }
 }
 
@@ -768,9 +994,14 @@ public class ProgressBarLite : Grid
 
     public bool Enabled = true;
 
+    /// <summary>Применять значение прямо во время перетаскивания.</summary>
+    public bool Live;
+
+    DateTime _lastLive = DateTime.MinValue;
+
     public ProgressBarLite(double thickness)
     {
-        Height = 14;
+        Height = 18;   // полоса тонкая, но хватать её нужно уверенно
         Background = Brushes.Transparent;   // ловим клик по всей высоте, не только по линии
         Cursor = Cursors.Hand;
 
@@ -792,8 +1023,8 @@ public class ProgressBarLite : Grid
         };
         _knob = new Ellipse
         {
-            Width = 8,
-            Height = 8,
+            Width = 10,
+            Height = 10,
             Fill = Brushes.White,
             HorizontalAlignment = HorizontalAlignment.Left,
             VerticalAlignment = VerticalAlignment.Center,
@@ -820,6 +1051,12 @@ public class ProgressBarLite : Grid
         {
             if (!_drag) return;
             Preview(e.GetPosition(this).X);
+
+            // громкость меняется сразу, а не по отпусканию — иначе тащишь
+            // вслепую; чаще 20 раз в секунду системе слать незачем
+            if (!Live || (DateTime.UtcNow - _lastLive).TotalMilliseconds < 50) return;
+            _lastLive = DateTime.UtcNow;
+            if (Seek != null) Seek(_value);
         };
         MouseLeftButtonUp += delegate (object s, MouseButtonEventArgs e)
         {

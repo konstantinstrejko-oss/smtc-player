@@ -141,6 +141,15 @@ public class ShardApp : Application
                 if (_window == null) return;
                 if (_window.IsVisible) _unload.Stop(); else _unload.Start();
             };
+
+            // первый показ ждёт, пока окно отрисуется за экраном: иначе на месте
+            // карточки на мгновение мелькает чёрный прямоугольник
+            _window.Prewarm();
+            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(delegate
+            {
+                if (_window != null) _window.ShowSmooth();
+            }));
+            return;
         }
         _window.ShowSmooth();
     }

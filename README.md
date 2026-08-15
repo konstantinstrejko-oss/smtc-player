@@ -75,11 +75,15 @@ The window is real glass: whatever sits underneath is blurred and warped by a
 pixel shader, and the tint comes from the current album art. Two layouts,
 horizontal and vertical. The window closes itself when it loses focus.
 
-The backdrop is captured once when the window opens and is not refreshed
-afterwards: the blur Windows itself produces belongs to the system, and no shader
-can be applied to those pixels — an application cannot reach them. In practice
-this means that if a video is playing underneath, the glass shows the frame
-captured at open time.
+The backdrop is **live**: it is re-read 25 times per second, so whatever happens
+underneath — a playing video included — shows through the glass. This costs about
+5 % of one core and only while the window is open.
+
+> To keep the capture from picking up the window itself (which would produce an
+> endless tunnel), the window is excluded from screen capture. Side effect: **the
+> player window will not appear in screenshots or screen recordings**. Set
+> `GlassLive=0` if you need it on a recording — the backdrop is then captured once
+> at open time.
 
 Default hotkeys: `Ctrl+Alt+Space` for play/pause, `Ctrl+Alt+←/→` for tracks,
 `Ctrl+Alt+↑/↓` for volume. Configurable in `%APPDATA%\Shard Player\config.ini`.
