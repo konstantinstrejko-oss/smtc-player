@@ -136,7 +136,7 @@ public class TrayIcon : IDisposable
         var data = Base();
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         data.uCallbackMessage = WM_APP_TRAY;
-        data.hIcon = _icon = TrayArt.BuildIcon(0, 0, _accent);
+        data.hIcon = _icon = TrayArt.BuildIcon(0, 0, _accent, TrayBackdrop.IsLight(_source.Handle));
         data.szTip = "Shard Player";
         _added = Shell_NotifyIcon(NIM_ADD, ref data);
 
@@ -158,14 +158,20 @@ public class TrayIcon : IDisposable
             _accent = Palette.Dominant(_accentFor, Color.FromArgb(120, 140, 200));
         }
 
+        // Светлая панель задач требует другого исполнения значка, и меняется она
+        // не только темой: панель полупрозрачна, поэтому светлеет от обоев и от
+        // развёрнутого под ней окна. Яркость входит в кадр — иначе значок
+        // остался бы в старом исполнении до следующей смены трека.
+        bool light = TrayBackdrop.IsLight(_source.Handle);
+
         // кадр кольца — 60 положений, чаще перерисовывать нечего
-        int frame = (int)Math.Round(PlayerState.Progress * 60) * 10 + PlayerState.State;
+        int frame = (int)Math.Round(PlayerState.Progress * 60) * 10 + PlayerState.State + (light ? 1000 : 0);
         string tip = PlayerState.Tooltip;
         if (frame == _lastFrame && tip == _lastTip) return;
         _lastFrame = frame;
         _lastTip = tip;
 
-        IntPtr fresh = TrayArt.BuildIcon(PlayerState.Progress, PlayerState.State, _accent);
+        IntPtr fresh = TrayArt.BuildIcon(PlayerState.Progress, PlayerState.State, _accent, light);
 
         var data = Base();
         data.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP;

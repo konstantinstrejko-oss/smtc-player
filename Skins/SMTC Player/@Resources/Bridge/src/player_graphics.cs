@@ -97,6 +97,71 @@ public static class Palette
     }
 }
 
+/// <summary>
+/// Насколько светла панель задач под самой иконкой.
+///
+/// Реестровой темы для этого мало: панель задач полупрозрачна, и при «тёмной»
+/// теме поверх светлых обоев она получается почти белой. Поэтому яркость
+/// меряется по экрану — в углах прямоугольника иконки, где сам знак не рисуется
+/// (он круглый) и виден чистый фон панели.
+/// </summary>
+public static class TrayBackdrop
+{
+    [DllImport("shell32.dll")] static extern int Shell_NotifyIconGetRect(ref NotifyIconIdentifier id, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("gdi32.dll")] static extern int GetPixel(IntPtr dc, int x, int y);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct NotifyIconIdentifier { public int cbSize; public IntPtr hWnd; public int uID; public Guid guidItem; }
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+
+    static bool _light;
+    static DateTime _measured = DateTime.MinValue;
+
+    /// <summary>Светлый ли фон под иконкой. Замер кэшируется на две секунды.</summary>
+    public static bool IsLight(IntPtr ownerWindow)
+    {
+        if ((DateTime.UtcNow - _measured).TotalSeconds < 2) return _light;
+        _measured = DateTime.UtcNow;
+
+        try
+        {
+            var id = new NotifyIconIdentifier { hWnd = ownerWindow, uID = 1, guidItem = Guid.Empty };
+            id.cbSize = Marshal.SizeOf(typeof(NotifyIconIdentifier));
+            RECT r;
+            if (Shell_NotifyIconGetRect(ref id, out r) != 0) return _light;
+            if (r.Right - r.Left < 6 || r.Bottom - r.Top < 6) return _light;
+
+            IntPtr dc = GetDC(IntPtr.Zero);
+            if (dc == IntPtr.Zero) return _light;
+            try
+            {
+                int[] xs = { r.Left + 1, r.Right - 2, r.Left + 1, r.Right - 2 };
+                int[] ys = { r.Top + 1, r.Top + 1, r.Bottom - 2, r.Bottom - 2 };
+                double sum = 0;
+                int n = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    int c = GetPixel(dc, xs[i], ys[i]);
+                    if (c == -1) continue;                       // CLR_INVALID
+                    int rr = c & 0xFF, gg = (c >> 8) & 0xFF, bb = (c >> 16) & 0xFF;
+                    sum += 0.299 * rr + 0.587 * gg + 0.114 * bb;
+                    n++;
+                }
+                if (n == 0) return _light;
+
+                double luma = sum / n;
+                // гистерезис: на границе иконка иначе моргала бы туда-сюда
+                _light = _light ? luma > 118 : luma > 145;
+            }
+            finally { ReleaseDC(IntPtr.Zero, dc); }
+        }
+        catch { }
+        return _light;
+    }
+}
+
 public static class TrayArt
 {
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
@@ -124,6 +189,16 @@ public static class TrayArt
     /// </summary>
     public static void DrawShard(Graphics g, float cx, float cy, float r, int alpha)
     {
+        DrawShard(g, cx, cy, r, alpha, false);
+    }
+
+    /// <summary>
+    /// onLight — знак идёт на светлую панель задач. Стёкла там притемняются:
+    /// светло-сиреневая пара на белом растворяется, и от знака остаётся одна
+    /// синяя половина — он читается как съехавший вбок.
+    /// </summary>
+    public static void DrawShard(Graphics g, float cx, float cy, float r, int alpha, bool onLight)
+    {
         float gap = r * 0.14f;
 
         var top = new PointF(cx, cy - r);
@@ -132,10 +207,27 @@ public static class TrayArt
         var left = new PointF(cx - r, cy);
         var mid = new PointF(cx, cy);
 
-        Piece(g, new[] { top, right, mid }, RightGlass, alpha, gap, cx, cy);
-        Piece(g, new[] { right, bottom, mid }, RightGlass, alpha, gap, cx, cy);
-        Piece(g, new[] { bottom, left, mid }, LeftGlass, alpha, gap, cx, cy);
-        Piece(g, new[] { left, top, mid }, LeftGlass, alpha, gap, cx, cy);
+        Color[] rightGlass = onLight ? Deepen(RightGlass) : RightGlass;
+        Color[] leftGlass = onLight ? Deepen(LeftGlass) : LeftGlass;
+
+        Piece(g, new[] { top, right, mid }, rightGlass, alpha, gap, cx, cy);
+        Piece(g, new[] { right, bottom, mid }, rightGlass, alpha, gap, cx, cy);
+        Piece(g, new[] { bottom, left, mid }, leftGlass, alpha, gap, cx, cy);
+        Piece(g, new[] { left, top, mid }, leftGlass, alpha, gap, cx, cy);
+    }
+
+    /// <summary>Тот же оттенок, но с яркостью, читаемой на белом.</summary>
+    static Color[] Deepen(Color[] glass)
+    {
+        var outp = new Color[glass.Length];
+        for (int i = 0; i < glass.Length; i++)
+        {
+            Color c = glass[i];
+            double max = Math.Max(c.R, Math.Max(c.G, c.B));
+            double k = max < 1 ? 1 : Math.Min(1.0, 168.0 / max);
+            outp[i] = Color.FromArgb((int)(c.R * k), (int)(c.G * k), (int)(c.B * k));
+        }
+        return outp;
     }
 
     static void Piece(Graphics g, PointF[] tri, Color[] glass, int alpha, float gap, float cx, float cy)
@@ -188,8 +280,28 @@ public static class TrayArt
     /// </summary>
     public static IntPtr BuildIcon(double progress, int state, Color accent)
     {
-        int s = IconSize;
-        using (var bmp = new Bitmap(s, s, PixelFormat.Format32bppArgb))
+        return BuildIcon(progress, state, accent, false);
+    }
+
+    /// <summary>
+    /// onLight — иконка идёт на светлую панель задач. Тогда всё, что рисовалось
+    /// белым, становится тёмным: белое кольцо на светлом фоне не видно вовсе, и
+    /// от значка остаётся одна дуга прогресса — та самая «синяя полоска» сбоку.
+    /// </summary>
+    public static IntPtr BuildIcon(double progress, int state, Color accent, bool onLight)
+    {
+        using (var bmp = Render(IconSize, progress, state, accent, onLight))
+            return bmp.GetHicon();
+    }
+
+    /// <summary>
+    /// Та же иконка растром. Вынесено из BuildIcon, потому что HICON нельзя
+    /// посмотреть глазами: обратная конвертация теряет полупрозрачность, и
+    /// проверка «видно ли значок на светлой панели» врала.
+    /// </summary>
+    public static Bitmap Render(int s, double progress, int state, Color accent, bool onLight)
+    {
+        var bmp = new Bitmap(s, s, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -200,12 +312,16 @@ public static class TrayArt
 
             int alpha = state == 0 ? 110 : 255;
 
-            using (var track = new Pen(Color.FromArgb(state == 0 ? 45 : 60, 255, 255, 255), thick))
+            Color trackColor = onLight
+                ? Color.FromArgb(state == 0 ? 40 : 58, 0, 0, 0)
+                : Color.FromArgb(state == 0 ? 45 : 60, 255, 255, 255);
+            using (var track = new Pen(trackColor, thick))
                 g.DrawEllipse(track, rect);
 
             if (state != 0 && progress > 0.001)
             {
-                using (var pen = new Pen(Color.FromArgb(alpha, Brighten(accent)), thick))
+                Color arc = onLight ? Deepen(accent) : Brighten(accent);
+                using (var pen = new Pen(Color.FromArgb(alpha, arc), thick))
                 {
                     pen.StartCap = LineCap.Round;
                     pen.EndCap = LineCap.Round;
@@ -213,21 +329,21 @@ public static class TrayArt
                 }
             }
 
-            DrawShard(g, s / 2f, s / 2f, s * 0.345f, alpha);
+            DrawShard(g, s / 2f, s / 2f, s * 0.345f, alpha, onLight);
 
             // на паузе поверх осколков ложатся две полоски
             if (state == 2)
             {
-                using (var br = new SolidBrush(Color.FromArgb(235, 255, 255, 255)))
+                Color bars = onLight ? Color.FromArgb(235, 24, 24, 32) : Color.FromArgb(235, 255, 255, 255);
+                using (var br = new SolidBrush(bars))
                 {
                     float w = s * 0.07f, h = s * 0.2f, gap = s * 0.06f;
                     g.FillRectangle(br, s * 0.5f - gap / 2 - w, s * 0.5f - h / 2, w, h);
                     g.FillRectangle(br, s * 0.5f + gap / 2, s * 0.5f - h / 2, w, h);
                 }
             }
-
-            return bmp.GetHicon();
         }
+        return bmp;
     }
 
     public static void Release(IntPtr icon)
@@ -244,5 +360,14 @@ public static class TrayArt
             (int)Math.Min(255, c.R * k),
             (int)Math.Min(255, c.G * k),
             (int)Math.Min(255, c.B * k));
+    }
+
+    /// <summary>Тот же оттенок, доведённый до яркости, читаемой на белом.</summary>
+    static Color Deepen(Color c)
+    {
+        double max = Math.Max(c.R, Math.Max(c.G, c.B));
+        if (max < 1) return Color.FromArgb(40, 40, 60);
+        double k = Math.Min(1.0, 150.0 / max);
+        return Color.FromArgb((int)(c.R * k), (int)(c.G * k), (int)(c.B * k));
     }
 }

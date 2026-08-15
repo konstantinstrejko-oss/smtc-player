@@ -35,6 +35,12 @@ public class GlassShader : ShaderEffect
     public static readonly DependencyProperty PhaseProperty =
         DependencyProperty.Register("Phase", typeof(double), typeof(GlassShader),
             new UIPropertyMetadata(0.0, PixelShaderConstantCallback(1)));
+    // Размер карточки в точках. Без него кромку не задать в точках: шейдер видит
+    // только координаты 0..1, и полоса преломления получалась бы вчетверо шире
+    // по короткой стороне.
+    public static readonly DependencyProperty SizeProperty =
+        DependencyProperty.Register("Size", typeof(Point), typeof(GlassShader),
+            new UIPropertyMetadata(new Point(440, 150), PixelShaderConstantCallback(2)));
 
     public GlassShader(string shaderPath, string noisePath)
     {
@@ -53,12 +59,14 @@ public class GlassShader : ShaderEffect
         UpdateShaderValue(NoiseProperty);
         UpdateShaderValue(AmountProperty);
         UpdateShaderValue(PhaseProperty);
+        UpdateShaderValue(SizeProperty);
     }
 
     public Brush Input { get { return (Brush)GetValue(InputProperty); } set { SetValue(InputProperty, value); } }
     public Brush Noise { get { return (Brush)GetValue(NoiseProperty); } set { SetValue(NoiseProperty, value); } }
     public double Amount { get { return (double)GetValue(AmountProperty); } set { SetValue(AmountProperty, value); } }
     public double Phase { get { return (double)GetValue(PhaseProperty); } set { SetValue(PhaseProperty, value); } }
+    public Point Size { get { return (Point)GetValue(SizeProperty); } set { SetValue(SizeProperty, value); } }
 }
 
 // ---------------------------------------------------------------- окно
@@ -179,9 +187,16 @@ public class PlayerWindow : Window
                 KernelType = KernelType.Gaussian
             }
         };
-        // поля выставляются при захвате: запас зависит от того, насколько окно
-        // прижато к краю экрана
-        _glassHost = new Border { Child = _glassImage, ClipToBounds = false };
+        // Снимок выпускается за границы окна на GlassPad — размытию нужно, что
+        // размывать по краям. Поля постоянные: недостающее у края экрана
+        // дорисовывает сам захват.
+        _glassImage.Margin = new Thickness(-GlassPad);
+        // ClipToBounds обязателен. Без него областью шейдера становится
+        // выпущенная за границы картинка, и координаты 0..1 внутри шейдера
+        // означают не карточку, а карточку с запасом — кромка съезжает, а у
+        // прижатого к краю экрана окна ещё и несимметрично. Размытие при этом не
+        // страдает: оно считается внутри, до обрезки.
+        _glassHost = new Border { Child = _glassImage, ClipToBounds = true };
 
         string shaderPath = IOPath.Combine(ResourceDir, "Glass", "glass.ps");
         string noisePath = IOPath.Combine(ResourceDir, "Glass", "noise.png");
@@ -197,6 +212,12 @@ public class PlayerWindow : Window
             }
             catch { _shader = null; }   // без искажения, но со стеклом
         }
+        // размер карточки шейдер должен знать: кромка задана в точках
+        _glassHost.SizeChanged += delegate
+        {
+            if (_shader == null) return;
+            _shader.Size = new Point(Math.Max(1, _glassHost.ActualWidth), Math.Max(1, _glassHost.ActualHeight));
+        };
         _root.Children.Add(_glassHost);
 
         // 2. тинт от обложки — стекло меняет оттенок вместе с треком
@@ -780,17 +801,22 @@ public class PlayerWindow : Window
         try
         {
             double scale = DpiScale;
-            // Снимаем с запасом по краям: преломление у границ уводит координаты
-            // наружу, и без запаса шейдер упирался бы в край текстуры — каналы
-            // клампятся по-разному, отчего по периметру шла цветная кайма.
+            // Снимаем с запасом по краям: размытию нужно, что размывать за
+            // границей карточки, иначе по периметру стекло редеет и сквозь него
+            // проступает тинт полосой.
             int pad = (int)Math.Round(GlassPad * scale);
             int wx = (int)Math.Round(Left * scale);
             int wy = (int)Math.Round(Top * scale);
             int ww = (int)Math.Round(Width * scale);
             int wh = (int)Math.Round(Height * scale);
 
-            // Запас нельзя брать за пределами экрана: оттуда читается мусор, и
-            // он проступает цветным пятном у той стороны, где окно прижато к краю.
+            // Размер снимка постоянный — окно плюс запас с четырёх сторон. Раньше
+            // он обрезался краем экрана, и картинка ложилась в окно со сдвигом.
+            int fullW = ww + pad * 2;
+            int fullH = wh + pad * 2;
+
+            // Читать за пределами экрана нельзя: оттуда приходит мусор. Чего не
+            // хватило, дорисуем растяжкой крайнего ряда пикселей.
             var bounds = D.Rectangle.FromLTRB(
                 (int)SystemParameters.VirtualScreenLeft, (int)SystemParameters.VirtualScreenTop,
                 (int)(SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth),
@@ -804,21 +830,26 @@ public class PlayerWindow : Window
             int h = bottom - y;
             if (w < 2 || h < 2) return;
 
-            // фактический запас с каждой стороны — на столько же выпускаем
-            // картинку за границы окна, чтобы она легла ровно на своё место
-            var shift = new Thickness(-(wx - x) / scale, -(wy - y) / scale,
-                                      -(right - wx - ww) / scale, -(bottom - wy - wh) / scale);
-            if (_glassImage.Margin != shift) _glassImage.Margin = shift;
+            // куда снятое ложится внутри снимка
+            int inX = x - (wx - pad);
+            int inY = y - (wy - pad);
 
-            // Фон уходит под сильное размытие, поэтому снимаем его уменьшенным:
-            // вчетверо меньше пикселей копировать и отдавать в WPF, а разницы не
-            // видно. Масштаб обратно делает GPU при отрисовке.
-            // Уменьшение снимка экономит копирование, но не чтение экрана —
-            // замер показал, что выигрыша по процессору почти нет, поэтому по
+            // Фон уходит под сильное размытие, поэтому снимать его можно
+            // уменьшенным: вчетверо меньше пикселей копировать и отдавать в WPF,
+            // а разницы не видно. Масштаб обратно делает GPU при отрисовке.
+            // Уменьшение экономит копирование, но не чтение экрана — замер
+            // показал, что выигрыша по процессору почти нет, поэтому по
             // умолчанию берём полное качество.
             int div = Math.Max(1, Math.Min(4, Settings.GetInt("GlassScale", 1)));
-            int cw = Math.Max(2, w / div);
-            int ch = Math.Max(2, h / div);
+            int cw = Math.Max(2, fullW / div);
+            int ch = Math.Max(2, fullH / div);
+
+            // те же прямоугольники в масштабе снимка
+            double kx = (double)cw / fullW, ky = (double)ch / fullH;
+            int dx = (int)Math.Round(inX * kx), dy = (int)Math.Round(inY * ky);
+            int dw = Math.Max(1, (int)Math.Round(w * kx)), dh = Math.Max(1, (int)Math.Round(h * ky));
+            if (dx + dw > cw) dw = cw - dx;
+            if (dy + dh > ch) dh = ch - dy;
 
             if (_shot == null || _shotW != cw || _shotH != ch)
             {
@@ -836,7 +867,23 @@ public class PlayerWindow : Window
                 try
                 {
                     SetStretchBltMode(dst, STRETCH_COLORONCOLOR);
-                    StretchBlt(dst, 0, 0, cw, ch, screen, x, y, w, h, SRCCOPY);
+                    StretchBlt(dst, dx, dy, dw, dh, screen, x, y, w, h, SRCCOPY);
+
+                    // Поля, которых не хватило до края экрана, заполняются
+                    // растянутым крайним рядом пикселей. Пустыми их оставлять
+                    // нельзя: размытие затянет в стекло прозрачность, и у
+                    // прижатой к краю карточки кромка светлеет полосой.
+                    int gapL = dx, gapT = dy;
+                    int gapR = cw - dx - dw, gapB = ch - dy - dh;
+                    if (gapL > 0) StretchBlt(dst, 0, dy, gapL, dh, screen, x, y, 1, h, SRCCOPY);
+                    if (gapR > 0) StretchBlt(dst, dx + dw, dy, gapR, dh, screen, right - 1, y, 1, h, SRCCOPY);
+                    if (gapT > 0) StretchBlt(dst, dx, 0, dw, gapT, screen, x, y, w, 1, SRCCOPY);
+                    if (gapB > 0) StretchBlt(dst, dx, dy + dh, dw, gapB, screen, x, bottom - 1, w, 1, SRCCOPY);
+                    // углы — от одного пикселя
+                    if (gapL > 0 && gapT > 0) StretchBlt(dst, 0, 0, gapL, gapT, screen, x, y, 1, 1, SRCCOPY);
+                    if (gapR > 0 && gapT > 0) StretchBlt(dst, dx + dw, 0, gapR, gapT, screen, right - 1, y, 1, 1, SRCCOPY);
+                    if (gapL > 0 && gapB > 0) StretchBlt(dst, 0, dy + dh, gapL, gapB, screen, x, bottom - 1, 1, 1, SRCCOPY);
+                    if (gapR > 0 && gapB > 0) StretchBlt(dst, dx + dw, dy + dh, gapR, gapB, screen, right - 1, bottom - 1, 1, 1, SRCCOPY);
                 }
                 finally
                 {
