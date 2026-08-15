@@ -52,6 +52,43 @@ The default installer is all you need.
 - Picks the session that is really playing, not the one that merely holds the
   media keys
 
+## Shard Player — the same thing in the tray
+
+A desktop widget is useless exactly when music is playing: the desktop is covered
+by a browser or a game. Since 1.1 the same process also runs a **tray icon** and a
+mini player window. Rainmeter is not required — there is a separate archive
+without it in the [releases](https://github.com/konstantinstrejko-oss/smtc-player/releases/latest).
+
+The icon is the indicator: its ring fills as the track plays, the glyph shows
+play or pause, and the tooltip carries artist and title.
+
+| Action | Result |
+|--------|--------|
+| Left click | open the player window |
+| Middle click | play / pause |
+| **Wheel over the icon** | volume of the source app, not the system volume |
+| Right click | menu: window layout, source, history, autostart |
+
+The window is real glass: whatever sits underneath is blurred and warped by a
+pixel shader, and the tint comes from the current album art. Two layouts,
+horizontal and vertical. The window closes itself when it loses focus.
+
+The backdrop is captured once when the window opens and is not refreshed
+afterwards: the blur Windows itself produces belongs to the system, and no shader
+can be applied to those pixels — an application cannot reach them. In practice
+this means that if a video is playing underneath, the glass shows the frame
+captured at open time.
+
+Default hotkeys: `Ctrl+Alt+Space` for play/pause, `Ctrl+Alt+←/→` for tracks,
+`Ctrl+Alt+↑/↓` for volume. Configurable in `%APPDATA%\Shard Player\config.ini`.
+
+> **Windows 11 hides new tray icons** behind the `^` chevron. Drag the icon out
+> onto the taskbar, or enable it under *Settings → Personalization → Taskbar →
+> Other system tray icons*, otherwise "always visible" does not hold.
+
+What the tray mode will never have: queue, playlist, likes or shuffle for Yandex
+Music. SMTC exposes a remote control only — transport, metadata and cover art.
+
 ## How it works
 
 Rainmeter cannot talk to WinRT, so a tiny background helper does it:
@@ -63,9 +100,14 @@ smtc_bridge.exe                        Rainmeter
  └─ cmd.inc      ◀──!WriteKeyValue──   button clicks
 ```
 
-The bridge is a ~14 KB C# executable with no window. The skin starts it on load,
-a mutex keeps a single copy, and it exits on its own about a minute after
-Rainmeter is gone.
+The bridge is a ~260 KB C# executable (fonts, shader and noise texture are
+embedded). The skin starts it on load and a mutex keeps a single copy. With the
+tray disabled it exits about a minute after Rainmeter is gone; with the tray on
+it keeps running, since it does not need Rainmeter at all.
+
+The SMTC loop and the interface live in separate threads: the loop is unchanged,
+while the tray and the window run on their own STA thread and talk to it through
+a command queue.
 
 On first run it copies itself to `%LOCALAPPDATA%\RainmeterSMTC` and runs from
 there — a running executable inside the skin folder cannot be moved, and the

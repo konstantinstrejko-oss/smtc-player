@@ -1,4 +1,4 @@
-﻿// SMTC Bridge для Rainmeter
+// SMTC Bridge для Rainmeter
 // -----------------------------------------------------------------------------
 // Читает Windows SMTC (Global System Media Transport Controls) — тот же источник,
 // что рисует системный медиа-оверлей. Работает с любым приложением, которое туда
@@ -398,6 +398,29 @@ public static class SmtcBridge
         return sb.ToString();
     }
 
+    static bool TrayEnabled = true;
+
+    /// <summary>
+    /// Интерфейс живёт в отдельном STA-потоке: цикл SMTC остаётся в главном,
+    /// как и был, и ничего про интерфейс не знает.
+    /// </summary>
+    static void StartUi()
+    {
+        var t = new Thread(delegate()
+        {
+            try
+            {
+                var app = new ShardApp();
+                app.Run();
+            }
+            catch (Exception ex) { Log("интерфейс упал: " + ex.Message); }
+            Environment.Exit(0);   // «Выход» в меню закрывает и мост
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.IsBackground = true;
+        t.Start();
+    }
+
     static int Main(string[] args)
     {
         DataDir = Path.Combine(
@@ -416,8 +439,17 @@ public static class SmtcBridge
                 CmdFileArg = args[i + 1];
             else if (a.Equals("-PollMs", StringComparison.OrdinalIgnoreCase))
                 int.TryParse(args[i + 1], out PollMs);
+            else if (a.Equals("-Tray", StringComparison.OrdinalIgnoreCase))
+                TrayEnabled = args[i + 1] != "0";
         }
         if (PollMs < 50) PollMs = 250;
+
+        Settings.Load();
+        // Аргумент главнее настройки: скин может явно попросить работать без трея.
+        bool trayArg = false;
+        foreach (string a in args) if (a.Equals("-Tray", StringComparison.OrdinalIgnoreCase)) trayArg = true;
+        if (!trayArg) TrayEnabled = Settings.GetBool("Tray", true);
+        if (PreferApp.Length == 0) PreferApp = Settings.Get("PreferApp", "");
 
         Directory.CreateDirectory(DataDir);
         LogFile = Path.Combine(DataDir, "bridge.log");
@@ -469,12 +501,33 @@ public static class SmtcBridge
             int resyncTick = 0;
             int resyncEvery = Math.Max(1, 5000 / PollMs);
             bool resyncRequested = true;
+            int sessionTick = 0;
+            int sessionEvery = Math.Max(1, 3000 / PollMs);
+            string[] sessionList = new string[0];
+
+            if (TrayEnabled) StartUi();
 
             while (true)
             {
                 try
                 {
                     var session = GetSession();
+
+                    // 1a. команды из интерфейса — трей и окно шлют их сюда
+                    string uiAction;
+                    while ((uiAction = PlayerState.Take()) != null)
+                    {
+                        if (uiAction.StartsWith("prefer:"))
+                        {
+                            PreferApp = uiAction.Substring(7);
+                            session = GetSession();
+                        }
+                        else
+                        {
+                            RunAction(uiAction, session);
+                            propsAge = int.MaxValue;
+                        }
+                    }
 
                     // 1. команды — первым делом, чтобы клик отзывался сразу
                     if (File.Exists(CmdFile))
@@ -501,6 +554,8 @@ public static class SmtcBridge
                     string vTitle = "—", vArtist = "", vAlbum = "", vApp = "", vCover = "";
                     string vPos = "0:00", vDur = "0:00";
                     int vState = 0, vProgress = 0;
+                    double vPosSec = 0, vDurSec = 0;
+                    bool vCanSeek = false;
 
                     if (session == null)
                     {
@@ -577,6 +632,9 @@ public static class SmtcBridge
                         vState = state; vProgress = progress;
                         vPos = FormatTime(posSec); vDur = FormatTime(durSec);
                         vApp = session.SourceAppUserModelId; vCover = coverPath;
+                        vPosSec = posSec; vDurSec = durSec;
+                        try { vCanSeek = playback != null && playback.Controls.IsPlaybackPositionEnabled; }
+                        catch { vCanSeek = false; }
                     }
 
                     // 4. отдаём значения скину. Раз в 5 с — принудительно целиком:
@@ -609,6 +667,26 @@ public static class SmtcBridge
                     SetVar("Header", vState == 1 ? "NOW PLAYING"
                                    : vState == 2 ? "PAUSED" : "NOTHING PLAYING", force);
 
+                    // 4a. то же самое — трею и окну. Список сессий нужен только
+                    // для меню «Источник», поэтому обновляется редко.
+                    if (TrayEnabled)
+                    {
+                        if (++sessionTick >= sessionEvery)
+                        {
+                            sessionTick = 0;
+                            try
+                            {
+                                var all = Manager.GetSessions();
+                                var names = new List<string>();
+                                foreach (var s in all) names.Add(s.SourceAppUserModelId);
+                                sessionList = names.ToArray();
+                            }
+                            catch { }
+                        }
+                        PlayerState.Publish(vTitle, vArtist, vAlbum, vApp, vCover,
+                                            vState, vPosSec, vDurSec, vCanSeek, sessionList);
+                    }
+
                     // 5. файл — для отладки и на случай, если понадобится второй потребитель
                     if (payload != lastPayload)
                     {
@@ -619,8 +697,9 @@ public static class SmtcBridge
 
                     // 5. Мост поднимает сам скин, поэтому и живёт он ровно
                     // столько же: без Rainmeter больше минуты — выходим, чтобы
-                    // не висеть в процессах впустую.
-                    if (++aliveTick >= aliveEvery)
+                    // не висеть в процессах впустую. В режиме трея этого делать
+                    // нельзя: там Rainmeter вообще может быть не установлен.
+                    if (!TrayEnabled && ++aliveTick >= aliveEvery)
                     {
                         aliveTick = 0;
                         if (Process.GetProcessesByName("Rainmeter").Length == 0)

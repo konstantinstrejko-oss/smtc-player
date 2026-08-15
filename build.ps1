@@ -80,7 +80,52 @@ $out.Write($footer, 0, $footer.Length)
 $out.Dispose()
 
 Remove-Item $zipPath -Force
+
+# Второй пакет — Shard Player сам по себе, без Rainmeter. Ассеты вшиты в exe,
+# поэтому в архиве только он и короткая инструкция.
+Write-Host '== пакет Shard Player (без Rainmeter) =='
+$trayZip = Join-Path $dist ("Shard-Player-{0}.zip" -f $version)
+if (Test-Path $trayZip) { Remove-Item $trayZip -Force }
+
+$trayStage = Join-Path $root 'obj\tray'
+New-Item -ItemType Directory -Force $trayStage | Out-Null
+Copy-Item (Join-Path $skinSrc '@Resources\Bridge\smtc_bridge.exe') (Join-Path $trayStage 'ShardPlayer.exe') -Force
+
+$readme = @"
+Shard Player $version
+
+Плеер в трее поверх Windows SMTC: показывает то, что играет в Яндекс Музыке,
+Spotify, браузере или любом другом приложении, которое видно системе.
+
+Запуск: ShardPlayer.exe — появится иконка в трее.
+
+ВАЖНО. Windows 11 по умолчанию прячет новые иконки под шеврон "^".
+Чтобы иконка была видна всегда, перетащите её из выпадающего окошка на панель
+задач или включите в разделе Параметры > Персонализация > Панель задач >
+Значки в углу панели задач.
+
+Управление:
+  левый клик по иконке    открыть окно плеера
+  средний клик            пауза / продолжить
+  колесо над иконкой      громкость приложения
+  правый клик             меню: вид окна, источник, история, автозапуск
+
+Горячие клавиши по умолчанию:
+  Ctrl+Alt+Пробел         пауза / продолжить
+  Ctrl+Alt+Влево/Вправо   предыдущий / следующий трек
+  Ctrl+Alt+Вверх/Вниз     громкость
+
+Настройки и журнал: %APPDATA%\Shard Player
+Обложки и лог:      %LOCALAPPDATA%\RainmeterSMTC
+
+Исходный код: https://github.com/konstantinstrejko-oss/smtc-player
+Лицензия MIT.
+"@
+Set-Content -Path (Join-Path $trayStage 'ПРОЧТИ.txt') -Value $readme -Encoding UTF8
+
+[System.IO.Compression.ZipFile]::CreateFromDirectory($trayStage, $trayZip)
 Remove-Item (Join-Path $root 'obj') -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
 Write-Host ("Готово: {0} ({1:n0} КБ)" -f $outFile, ((Get-Item $outFile).Length / 1KB))
+Write-Host ("Готово: {0} ({1:n0} КБ)" -f $trayZip, ((Get-Item $trayZip).Length / 1KB))
