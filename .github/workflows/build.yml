@@ -9,6 +9,11 @@ jobs:
   package:
     runs-on: windows-latest
 
+    # Без этого шаг публикации падает с «Resource not accessible by
+    # integration»: по умолчанию токен рабочего процесса доступен только на чтение.
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v7
 
