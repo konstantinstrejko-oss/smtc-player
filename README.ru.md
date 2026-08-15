@@ -54,11 +54,12 @@ Rainmeter — бесплатная программа с открытым исх
 
 ## Shard Player — то же самое в трее
 
+[![Скачать Shard Player](https://img.shields.io/badge/Скачать-Shard--Player.zip-7b5cff?style=for-the-badge)](https://github.com/konstantinstrejko-oss/smtc-player/releases/latest/download/Shard-Player.zip)
+
 Виджет на рабочем столе бесполезен ровно тогда, когда музыка играет: стол закрыт
 браузером или игрой. Поэтому с версии 1.1 тот же процесс держит **иконку в трее**
-и мини-окно плеера. Rainmeter для этого не нужен — есть
-[отдельный архив](https://github.com/konstantinstrejko-oss/smtc-player/releases/latest)
-без него.
+и мини-окно плеера. Rainmeter для этого не нужен — архив выше содержит только
+`ShardPlayer.exe`, запускать больше нечего.
 
 Иконка — это и есть индикатор: кольцо вокруг неё заполняется по мере трека,
 внутри треугольник или пауза, подсказка показывает исполнителя и название.

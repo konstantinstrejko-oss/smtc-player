@@ -54,10 +54,12 @@ The default installer is all you need.
 
 ## Shard Player — the same thing in the tray
 
+[![Download Shard Player](https://img.shields.io/badge/Download-Shard--Player.zip-7b5cff?style=for-the-badge)](https://github.com/konstantinstrejko-oss/smtc-player/releases/latest/download/Shard-Player.zip)
+
 A desktop widget is useless exactly when music is playing: the desktop is covered
 by a browser or a game. Since 1.1 the same process also runs a **tray icon** and a
-mini player window. Rainmeter is not required — there is a separate archive
-without it in the [releases](https://github.com/konstantinstrejko-oss/smtc-player/releases/latest).
+mini player window. Rainmeter is not required — the archive above contains a
+single `ShardPlayer.exe`.
 
 The icon is the indicator: its ring fills as the track plays, the glyph shows
 play or pause, and the tooltip carries artist and title.

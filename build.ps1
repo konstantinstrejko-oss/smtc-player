@@ -84,7 +84,9 @@ Remove-Item $zipPath -Force
 # Второй пакет — Shard Player сам по себе, без Rainmeter. Ассеты вшиты в exe,
 # поэтому в архиве только он и короткая инструкция.
 Write-Host '== пакет Shard Player (без Rainmeter) =='
-$trayZip = Join-Path $dist ("Shard-Player-{0}.zip" -f $version)
+# имя без версии: ссылка /releases/latest/download/Shard-Player.zip должна
+# оставаться рабочей от релиза к релизу
+$trayZip = Join-Path $dist "Shard-Player.zip"
 if (Test-Path $trayZip) { Remove-Item $trayZip -Force }
 
 $trayStage = Join-Path $root 'obj\tray'

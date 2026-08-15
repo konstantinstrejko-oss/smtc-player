@@ -24,12 +24,17 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: SMTC-Player-rmskin
-          path: dist/SMTC-Player.rmskin
+          name: SMTC-Player
+          path: |
+            dist/SMTC-Player.rmskin
+            dist/Shard-Player.zip
           if-no-files-found: error
 
+      # Два пакета: скин Rainmeter вместе с треем и отдельный Shard Player
       - name: Приложить к релизу
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/SMTC-Player.rmskin
+          files: |
+            dist/SMTC-Player.rmskin
+            dist/Shard-Player.zip
