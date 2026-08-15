@@ -77,6 +77,9 @@ public class PlayerWindow : Window
     /// <summary>Радиус скругления окна.</summary>
     const double Radius = 20;
 
+    /// <summary>Плотность оттенка обложки поверх стекла.</summary>
+    const byte TintAlpha = 0x26;
+
     // слои и элементы
     Border _glassHost, _tint;
     Image _glassImage;
@@ -161,7 +164,13 @@ public class PlayerWindow : Window
         _glassImage = new Image
         {
             Stretch = Stretch.Fill,
-            Effect = new BlurEffect { Radius = 26, KernelType = KernelType.Gaussian }
+            Effect = new BlurEffect
+            {
+                // Чем сильнее размытие, тем меньше от фона остаётся: на большом
+                // радиусе стекло превращается в ровное пятно.
+                Radius = Math.Max(2, Math.Min(60, Settings.GetInt("GlassBlur", 14))),
+                KernelType = KernelType.Gaussian
+            }
         };
         _glassHost = new Border { Child = _glassImage, ClipToBounds = true };
 
@@ -182,20 +191,31 @@ public class PlayerWindow : Window
         _root.Children.Add(_glassHost);
 
         // 2. тинт от обложки — стекло меняет оттенок вместе с треком
-        _tint = new Border { Background = new SolidColorBrush(Color.FromArgb(0x38, 90, 110, 170)) };
+        _tint = new Border { Background = new SolidColorBrush(Color.FromArgb(TintAlpha, 90, 110, 170)) };
         _root.Children.Add(_tint);
 
-        // 3. затемнение — иначе текст на светлом фоне не читается
+        // 3. лёгкая вуаль. Раньше здесь было плотное затемнение ради читаемости
+        // текста — теперь текст держится собственной тенью, и фон можно оставить
+        // почти нетронутым.
         _root.Children.Add(new Border
         {
-            // затемнение только чтобы текст не терялся; стекло должно оставаться
-            // стеклом, а не тёмной плашкой
             Background = new LinearGradientBrush(
-                Color.FromArgb(88, 10, 10, 14), Color.FromArgb(158, 6, 6, 10), 90)
+                Color.FromArgb(38, 10, 10, 14), Color.FromArgb(86, 6, 6, 10), 90)
         });
 
-        // 3. содержимое
-        _content = new Grid { Margin = new Thickness(16) };
+        // 3. содержимое. Тень под ним заменяет плотное затемнение всей карточки:
+        // текст читается на любом фоне, а сам фон остаётся видимым.
+        _content = new Grid
+        {
+            Margin = new Thickness(16),
+            Effect = new DropShadowEffect
+            {
+                BlurRadius = 10,
+                ShadowDepth = 0,
+                Opacity = 0.95,
+                Color = Colors.Black
+            }
+        };
         BuildContent();
         _root.Children.Add(_content);
 
@@ -632,7 +652,7 @@ public class PlayerWindow : Window
         if (fresh.ToArgb() != _accent.ToArgb())
         {
             _accent = fresh;
-            _tint.Background = new SolidColorBrush(Color.FromArgb(0x38, _accent.R, _accent.G, _accent.B));
+            _tint.Background = new SolidColorBrush(Color.FromArgb(TintAlpha, _accent.R, _accent.G, _accent.B));
             var glow = Color.FromArgb(150, _accent.R, _accent.G, _accent.B);
             _progress.Accent = glow;
             _volume.Accent = glow;
