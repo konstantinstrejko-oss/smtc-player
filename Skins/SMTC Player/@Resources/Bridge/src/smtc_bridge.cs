@@ -254,11 +254,60 @@ public static class SmtcBridge
         }
     }
 
-    static string ReadCommand()
+    // ------------------------------------------------------------ каналы команд
+    //
+    // Копия только одна, а каналов может быть несколько: скин Rainmeter пишет в
+    // cmd.inc рядом с собой, отдельно запущенный Shard Player — в свой файл.
+    // Кто первым занял мьютекс, тот и работал бы только со своим каналом, а у
+    // второго кнопки оказались бы мертвы. Поэтому каждый экземпляр записывает
+    // свой путь в общий список, а живой мост следит сразу за всеми.
+
+    static string ChannelsFile;
+    static readonly Dictionary<string, DateTime> ChannelStamps =
+        new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+    static void RegisterChannel(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(ChannelsFile));
+            var known = new List<string>();
+            if (File.Exists(ChannelsFile)) known.AddRange(File.ReadAllLines(ChannelsFile, new UTF8Encoding(false)));
+
+            foreach (string line in known)
+                if (string.Equals(line.Trim(), path, StringComparison.OrdinalIgnoreCase)) return;
+
+            known.Add(path);
+            File.WriteAllLines(ChannelsFile, known.ToArray(), new UTF8Encoding(false));
+        }
+        catch { }
+    }
+
+    /// <summary>Подхватывает каналы, зарегистрированные другими запусками.</summary>
+    static void RefreshChannels()
     {
         try
         {
-            foreach (string line in File.ReadAllLines(CmdFile))
+            if (!File.Exists(ChannelsFile)) return;
+            foreach (string raw in File.ReadAllLines(ChannelsFile, new UTF8Encoding(false)))
+            {
+                string path = raw.Trim();
+                if (path.Length == 0 || ChannelStamps.ContainsKey(path)) continue;
+
+                // новый канал не должен выстрелить лежавшей в нём старой командой
+                ChannelStamps[path] = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+                Log("канал команд подключён: " + path);
+            }
+        }
+        catch { }
+    }
+
+    static string ReadCommand(string file)
+    {
+        try
+        {
+            foreach (string line in File.ReadAllLines(file))
             {
                 string t = line.Trim();
                 if (t.StartsWith("Action", StringComparison.OrdinalIgnoreCase))
@@ -423,6 +472,48 @@ public static class SmtcBridge
 
     static int Main(string[] args)
     {
+        // Ни одно падение не должно доходить до пользователя окном «Прекращена
+        // работа программы»: это фоновый процесс, его дело — записать причину в
+        // лог и тихо выйти. Особенно важно на чужих машинах, где SMTC может
+        // отсутствовать вовсе.
+        AppDomain.CurrentDomain.UnhandledException += delegate (object s, UnhandledExceptionEventArgs e)
+        {
+            try { Log("НЕОБРАБОТАННОЕ: " + e.ExceptionObject); } catch { }
+            Environment.Exit(0);
+        };
+
+        try { return Run(args); }
+        catch (Exception ex)
+        {
+            Log("старт не удался: " + ex);
+            return 0;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct OsVersionInfo
+    {
+        public int dwOSVersionInfoSize, dwMajorVersion, dwMinorVersion, dwBuildNumber, dwPlatformId;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string szCSDVersion;
+    }
+
+    [DllImport("ntdll.dll")] static extern int RtlGetVersion(ref OsVersionInfo info);
+
+    static string RealWindowsVersion()
+    {
+        try
+        {
+            var info = new OsVersionInfo();
+            info.dwOSVersionInfoSize = Marshal.SizeOf(typeof(OsVersionInfo));
+            if (RtlGetVersion(ref info) == 0)
+                return info.dwMajorVersion + "." + info.dwMinorVersion + "." + info.dwBuildNumber;
+        }
+        catch { }
+        return Environment.OSVersion.Version + " (по манифесту)";
+    }
+
+    static int Run(string[] args)
+    {
         DataDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RainmeterSMTC");
 
@@ -454,16 +545,31 @@ public static class SmtcBridge
         Directory.CreateDirectory(DataDir);
         LogFile = Path.Combine(DataDir, "bridge.log");
 
+        // Версия нужна только для разбора чужих логов, отказывать по ней нельзя:
+        // Environment.OSVersion без манифеста совместимости показывает 6.2 даже
+        // на Windows 11. Настоящую отдаёт RtlGetVersion. Пригодность системы
+        // определяется не номером, а тем, поднимется ли SMTC.
+        Log("Windows " + RealWindowsVersion());
+
         // Запущенный exe нельзя ни перезаписать, ни перенести, а лежит он в
         // папке скина — установщик Rainmeter спотыкается об это при каждом
         // обновлении («Unable to move to ...\@Backup»). Поэтому из папки скина
         // мост только переносит себя в %LOCALAPPDATA% и работает уже оттуда.
         if (RelaunchFromLocalCopy(args)) return 0;
 
+        ChannelsFile = Path.Combine(DataDir, "channels.txt");
+
         bool created;
         using (var mutex = new Mutex(true, "Local\\RainmeterSMTCBridge", out created))
         {
-            if (!created) return 0;   // мост уже запущен
+            if (!created)
+            {
+                // Мост уже работает. Уходим, но сначала оставляем ему свой канал
+                // команд — иначе кнопки того, кто запустился вторым, молчали бы.
+                RegisterChannel(CmdFileArg.Length > 0
+                    ? CmdFileArg : Path.Combine(DataDir, "cmd.ini"));
+                return 0;
+            }
 
             Directory.CreateDirectory(DataDir);
             DataFile = Path.Combine(DataDir, "nowplaying.txt");
@@ -482,9 +588,8 @@ public static class SmtcBridge
 
             Log("bridge стартовал, DataDir=" + DataDir + ", config=" + Config + ", cmd=" + CmdFile);
 
-            DateTime lastCmdStamp = File.Exists(CmdFile)
-                ? File.GetLastWriteTimeUtc(CmdFile)
-                : DateTime.MinValue;
+            RegisterChannel(CmdFile);
+            RefreshChannels();
 
             var utf8 = new UTF8Encoding(false);
             string lastPayload = "";
@@ -503,6 +608,8 @@ public static class SmtcBridge
             bool resyncRequested = true;
             int sessionTick = 0;
             int sessionEvery = Math.Max(1, 3000 / PollMs);
+            int channelTick = 0;
+            int channelEvery = Math.Max(1, 2000 / PollMs);
             string[] sessionList = new string[0];
 
             if (TrayEnabled) StartUi();
@@ -529,24 +636,27 @@ public static class SmtcBridge
                         }
                     }
 
-                    // 1. команды — первым делом, чтобы клик отзывался сразу
-                    if (File.Exists(CmdFile))
+                    // 1. команды — первым делом, чтобы клик отзывался сразу.
+                    // Каналов может быть несколько: скин и отдельный запуск.
+                    if (++channelTick >= channelEvery) { channelTick = 0; RefreshChannels(); }
+
+                    foreach (string channel in new List<string>(ChannelStamps.Keys))
                     {
-                        DateTime stamp = File.GetLastWriteTimeUtc(CmdFile);
-                        if (stamp > lastCmdStamp)
+                        if (!File.Exists(channel)) continue;
+                        DateTime stamp = File.GetLastWriteTimeUtc(channel);
+                        if (stamp <= ChannelStamps[channel]) continue;
+
+                        ChannelStamps[channel] = stamp;
+                        string action = ReadCommand(channel);
+                        if (action == "resync")
                         {
-                            lastCmdStamp = stamp;
-                            string action = ReadCommand();
-                            if (action == "resync")
-                            {
-                                // скин перезагрузился и потерял значения
-                                resyncRequested = true;
-                            }
-                            else if (action.Length > 0)
-                            {
-                                RunAction(action, session);
-                                propsAge = int.MaxValue;   // метаданные перечитать сразу
-                            }
+                            // скин перезагрузился и потерял значения
+                            resyncRequested = true;
+                        }
+                        else if (action.Length > 0)
+                        {
+                            RunAction(action, session);
+                            propsAge = int.MaxValue;   // метаданные перечитать сразу
                         }
                     }
 

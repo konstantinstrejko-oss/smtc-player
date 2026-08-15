@@ -72,6 +72,15 @@ public class ShardApp : Application
     {
         base.OnStartup(e);
 
+        // Сбой в отрисовке окна не должен уносить с собой мост: виджет на
+        // рабочем столе обязан продолжать работать.
+        DispatcherUnhandledException += delegate (object s,
+            System.Windows.Threading.DispatcherUnhandledExceptionEventArgs args)
+        {
+            Diag.Log("интерфейс: " + args.Exception);
+            args.Handled = true;
+        };
+
         Assets.Unpack();
         PlayerWindow.ResourceDir = Assets.Dir;
 
