@@ -39,10 +39,14 @@ public class GlassShader : ShaderEffect
     public GlassShader(string shaderPath, string noisePath)
     {
         PixelShader = new PixelShader { UriSource = new Uri(shaderPath) };
+        // Viewport в АБСОЛЮТНЫХ единицах ужал бы текстуру до одного пикселя, и
+        // шум превратился бы в сетку с периодом 1 px — на экране это полосы, а
+        // дисперсия каналов делает их радужными. Нужны относительные единицы:
+        // текстура на весь элемент, тайлинг — чтобы дрейф не упирался в край.
         Noise = new ImageBrush(new BitmapImage(new Uri(noisePath)))
         {
             TileMode = TileMode.Tile,
-            ViewportUnits = BrushMappingMode.Absolute,
+            ViewportUnits = BrushMappingMode.RelativeToBoundingBox,
             Viewport = new Rect(0, 0, 1, 1)
         };
         UpdateShaderValue(InputProperty);
@@ -79,6 +83,9 @@ public class PlayerWindow : Window
 
     /// <summary>Плотность оттенка обложки поверх стекла.</summary>
     const byte TintAlpha = 0x26;
+
+    /// <summary>Запас снимка фона по краям, чтобы преломлению было что брать.</summary>
+    const double GlassPad = 24;
 
     // слои и элементы
     Border _glassHost, _tint;
@@ -172,7 +179,9 @@ public class PlayerWindow : Window
                 KernelType = KernelType.Gaussian
             }
         };
-        _glassHost = new Border { Child = _glassImage, ClipToBounds = true };
+        // поля выставляются при захвате: запас зависит от того, насколько окно
+        // прижато к краю экрана
+        _glassHost = new Border { Child = _glassImage, ClipToBounds = false };
 
         string shaderPath = IOPath.Combine(ResourceDir, "Glass", "glass.ps");
         string noisePath = IOPath.Combine(ResourceDir, "Glass", "noise.png");
@@ -200,7 +209,7 @@ public class PlayerWindow : Window
         _root.Children.Add(new Border
         {
             Background = new LinearGradientBrush(
-                Color.FromArgb(38, 10, 10, 14), Color.FromArgb(86, 6, 6, 10), 90)
+                Color.FromArgb(56, 10, 10, 14), Color.FromArgb(112, 6, 6, 10), 90)
         });
 
         // 3. содержимое. Тень под ним заменяет плотное затемнение всей карточки:
@@ -771,11 +780,35 @@ public class PlayerWindow : Window
         try
         {
             double scale = DpiScale;
-            int x = (int)Math.Round(Left * scale);
-            int y = (int)Math.Round(Top * scale);
-            int w = (int)Math.Round(Width * scale);
-            int h = (int)Math.Round(Height * scale);
+            // Снимаем с запасом по краям: преломление у границ уводит координаты
+            // наружу, и без запаса шейдер упирался бы в край текстуры — каналы
+            // клампятся по-разному, отчего по периметру шла цветная кайма.
+            int pad = (int)Math.Round(GlassPad * scale);
+            int wx = (int)Math.Round(Left * scale);
+            int wy = (int)Math.Round(Top * scale);
+            int ww = (int)Math.Round(Width * scale);
+            int wh = (int)Math.Round(Height * scale);
+
+            // Запас нельзя брать за пределами экрана: оттуда читается мусор, и
+            // он проступает цветным пятном у той стороны, где окно прижато к краю.
+            var bounds = D.Rectangle.FromLTRB(
+                (int)SystemParameters.VirtualScreenLeft, (int)SystemParameters.VirtualScreenTop,
+                (int)(SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth),
+                (int)(SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight));
+
+            int x = Math.Max(bounds.Left, wx - pad);
+            int y = Math.Max(bounds.Top, wy - pad);
+            int right = Math.Min(bounds.Right, wx + ww + pad);
+            int bottom = Math.Min(bounds.Bottom, wy + wh + pad);
+            int w = right - x;
+            int h = bottom - y;
             if (w < 2 || h < 2) return;
+
+            // фактический запас с каждой стороны — на столько же выпускаем
+            // картинку за границы окна, чтобы она легла ровно на своё место
+            var shift = new Thickness(-(wx - x) / scale, -(wy - y) / scale,
+                                      -(right - wx - ww) / scale, -(bottom - wy - wh) / scale);
+            if (_glassImage.Margin != shift) _glassImage.Margin = shift;
 
             // Фон уходит под сильное размытие, поэтому снимаем его уменьшенным:
             // вчетверо меньше пикселей копировать и отдавать в WPF, а разницы не
@@ -813,6 +846,18 @@ public class PlayerWindow : Window
             }
 
             int w2 = cw, h2 = ch;
+            if (Settings.GetBool("DumpGlass", false))
+            {
+                Settings.Set("DumpGlass", false);   // один раз
+                try
+                {
+                    string dump = IOPath.Combine(Settings.Dir, "glass_dump.png");
+                    _shot.Save(dump, D.Imaging.ImageFormat.Png);
+                    Diag.Log("снимок фона сохранён: " + dump);
+                }
+                catch (Exception ex) { Diag.Log("снимок фона не сохранён: " + ex.Message); }
+            }
+
             var rect = new D.Rectangle(0, 0, w2, h2);
             var data = _shot.LockBits(rect, D.Imaging.ImageLockMode.ReadOnly, D.Imaging.PixelFormat.Format32bppPArgb);
             try
@@ -973,9 +1018,13 @@ public class PlayerWindow : Window
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
         });
 
-        if (_shader != null)
+        // Дрейф фазы по умолчанию выключен: стекло не должно само по себе течь,
+        // оно преломляет то, что за ним. Постоянное движение картинки читается
+        // как дефект, а не как эффект.
+        int drift = Math.Max(0, Math.Min(600, Settings.GetInt("GlassDrift", 0)));
+        if (_shader != null && drift > 0)
             _shader.BeginAnimation(GlassShader.PhaseProperty,
-                new DoubleAnimation(0, 24, TimeSpan.FromSeconds(30)) { RepeatBehavior = RepeatBehavior.Forever });
+                new DoubleAnimation(0, 24, TimeSpan.FromSeconds(drift)) { RepeatBehavior = RepeatBehavior.Forever });
     }
 
     /// <summary>

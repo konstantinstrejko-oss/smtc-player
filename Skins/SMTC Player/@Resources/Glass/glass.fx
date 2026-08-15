@@ -13,24 +13,19 @@ float4 main(float2 uv : TEXCOORD) : COLOR
 
     float2 n = tex2D(noise, nuv).rg - 0.5;
 
-    // Градиент шума считаем вручную: он же служит псевдонормалью стекла,
-    // по которой дальше кладётся блик.
-    const float e = 0.004;
-    float n0 = tex2D(noise, nuv).r;
-    float nx = tex2D(noise, nuv + float2(e, 0)).r;
-    float ny = tex2D(noise, nuv + float2(0, e)).r;
-    float2 grad = float2(nx - n0, ny - n0);
-
     // Толстая линза: к краям карточки преломление усиливается, как у настоящего
     // стекла с фаской.
+    // Знак минус: линза преломляет к центру, как настоящее стекло. Смещение
+    // наружу уводило бы выборку за край снимка и красило периметр каймой.
     float2 c = uv - 0.5;
     float edge = saturate(dot(c, c) * 3.4);
-    float2 lens = c * edge * Amount * 2.2;
+    float2 lens = -c * edge * Amount * 2.2;
 
-    float2 off = n * Amount * 2.6 + lens + grad * Amount * 6.0;
+    float2 off = n * Amount * 1.8 + lens;
 
-    // Каналы расходятся по-разному — так ведёт себя настоящее стекло.
-    float2 disp = n * Amount * 0.55;
+    // Каналы расходятся по-разному — так ведёт себя настоящее стекло. Больше
+    // 0.2 от Amount дисперсия начинает красить однородный фон.
+    float2 disp = n * Amount * 0.18;
 
     float4 col;
     col.r = tex2D(src, saturate(uv + off + disp)).r;
@@ -38,11 +33,8 @@ float4 main(float2 uv : TEXCOORD) : COLOR
     col.b = tex2D(src, saturate(uv + off - disp)).b;
     col.a = tex2D(src, saturate(uv + off)).a;
 
-    // Блик по «поверхности»: чем круче наклон, тем ярче отсвет.
-    float3 normal = normalize(float3(grad * 90.0, 1.0));
-    float3 light = normalize(float3(-0.55, -0.75, 0.62));
-    float spec = pow(saturate(dot(normal, light)), 14.0);
-    col.rgb += spec * 0.42;
-
+    // Блика здесь нет намеренно: он считался по разнице соседних сэмплов шума,
+    // а билинейная интерполяция делает её ступенчатой — резкая степенная
+    // функция превращала ступеньки в рябь по всему стеклу.
     return col;
 }
