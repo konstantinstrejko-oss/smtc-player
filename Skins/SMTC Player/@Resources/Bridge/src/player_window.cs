@@ -173,7 +173,7 @@ public class PlayerWindow : Window
             {
                 _shader = new GlassShader(new Uri(shaderPath).AbsoluteUri, new Uri(noisePath).AbsoluteUri)
                 {
-                    Amount = 0.032
+                    Amount = Math.Max(0.0, Math.Min(0.2, Settings.GetInt("GlassAmount", 55) / 1000.0))
                 };
                 _glassHost.Effect = _shader;
             }
@@ -188,8 +188,10 @@ public class PlayerWindow : Window
         // 3. затемнение — иначе текст на светлом фоне не читается
         _root.Children.Add(new Border
         {
+            // затемнение только чтобы текст не терялся; стекло должно оставаться
+            // стеклом, а не тёмной плашкой
             Background = new LinearGradientBrush(
-                Color.FromArgb(105, 10, 10, 14), Color.FromArgb(175, 6, 6, 10), 90)
+                Color.FromArgb(88, 10, 10, 14), Color.FromArgb(158, 6, 6, 10), 90)
         });
 
         // 3. содержимое
@@ -714,13 +716,21 @@ public class PlayerWindow : Window
     }
 
     [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr h, uint affinity);
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("gdi32.dll")] static extern int SetStretchBltMode(IntPtr dc, int mode);
+    [DllImport("gdi32.dll")]
+    static extern bool StretchBlt(IntPtr dst, int xd, int yd, int wd, int hd,
+                                  IntPtr src, int xs, int ys, int ws, int hs, uint rop);
+
+    const int STRETCH_COLORONCOLOR = 3;
+    const uint SRCCOPY = 0x00CC0020;
 
     const uint WDA_NONE = 0;
     const uint WDA_EXCLUDEFROMCAPTURE = 0x11;
 
     D.Bitmap _shot;
     WriteableBitmap _live;
-    DispatcherTimer _glassTimer;
     int _shotW, _shotH;
 
     double DpiScale
@@ -747,24 +757,48 @@ public class PlayerWindow : Window
             int h = (int)Math.Round(Height * scale);
             if (w < 2 || h < 2) return;
 
-            if (_shot == null || _shotW != w || _shotH != h)
+            // Фон уходит под сильное размытие, поэтому снимаем его уменьшенным:
+            // вчетверо меньше пикселей копировать и отдавать в WPF, а разницы не
+            // видно. Масштаб обратно делает GPU при отрисовке.
+            // Уменьшение снимка экономит копирование, но не чтение экрана —
+            // замер показал, что выигрыша по процессору почти нет, поэтому по
+            // умолчанию берём полное качество.
+            int div = Math.Max(1, Math.Min(4, Settings.GetInt("GlassScale", 1)));
+            int cw = Math.Max(2, w / div);
+            int ch = Math.Max(2, h / div);
+
+            if (_shot == null || _shotW != cw || _shotH != ch)
             {
                 if (_shot != null) _shot.Dispose();
-                _shot = new D.Bitmap(w, h, D.Imaging.PixelFormat.Format32bppPArgb);
-                _live = new WriteableBitmap(w, h, 96, 96, PixelFormats.Pbgra32, null);
-                _shotW = w; _shotH = h;
+                _shot = new D.Bitmap(cw, ch, D.Imaging.PixelFormat.Format32bppPArgb);
+                _live = new WriteableBitmap(cw, ch, 96, 96, PixelFormats.Pbgra32, null);
+                _shotW = cw; _shotH = ch;
                 _glassImage.Source = _live;
             }
 
             using (var g = D.Graphics.FromImage(_shot))
-                g.CopyFromScreen(x, y, 0, 0, new D.Size(w, h), D.CopyPixelOperation.SourceCopy);
+            {
+                IntPtr dst = g.GetHdc();
+                IntPtr screen = GetDC(IntPtr.Zero);
+                try
+                {
+                    SetStretchBltMode(dst, STRETCH_COLORONCOLOR);
+                    StretchBlt(dst, 0, 0, cw, ch, screen, x, y, w, h, SRCCOPY);
+                }
+                finally
+                {
+                    ReleaseDC(IntPtr.Zero, screen);
+                    g.ReleaseHdc(dst);
+                }
+            }
 
-            var rect = new D.Rectangle(0, 0, w, h);
+            int w2 = cw, h2 = ch;
+            var rect = new D.Rectangle(0, 0, w2, h2);
             var data = _shot.LockBits(rect, D.Imaging.ImageLockMode.ReadOnly, D.Imaging.PixelFormat.Format32bppPArgb);
             try
             {
-                _live.WritePixels(new Int32Rect(0, 0, w, h), data.Scan0, data.Stride * h, data.Stride);
-                if (Settings.GetBool("Debug", false)) LogFingerprint(data, w, h);
+                _live.WritePixels(new Int32Rect(0, 0, w2, h2), data.Scan0, data.Stride * h2, data.Stride);
+                if (Settings.GetBool("Debug", false)) LogFingerprint(data, w2, h2);
             }
             finally { _shot.UnlockBits(data); }
         }
@@ -821,21 +855,41 @@ public class PlayerWindow : Window
             return;
         }
 
-        if (_glassTimer == null)
+        // Таймер даёт рывки: он не совпадает с кадрами композитора, и снимок то
+        // отстаёт, то дублируется. CompositionTarget.Rendering срабатывает перед
+        // каждым кадром WPF, поэтому фон обновляется ровно тогда, когда его
+        // собираются рисовать.
+        _glassFps = Math.Max(0, Math.Min(240, Settings.GetInt("GlassFps", 0)));
+        if (!_renderHooked)
         {
-            int fps = Math.Max(5, Math.Min(60, Settings.GetInt("GlassFps", 25)));
-            _glassTimer = new DispatcherTimer(DispatcherPriority.Render)
-            {
-                Interval = TimeSpan.FromMilliseconds(1000.0 / fps)
-            };
-            _glassTimer.Tick += delegate { if (IsVisible) CaptureBehind(); };
+            CompositionTarget.Rendering += OnRenderFrame;
+            _renderHooked = true;
         }
-        _glassTimer.Start();
+    }
+
+    int _glassFps;
+    bool _renderHooked;
+    DateTime _lastCapture = DateTime.MinValue;
+
+    void OnRenderFrame(object sender, EventArgs e)
+    {
+        if (!IsVisible) return;
+
+        // GlassFps=0 — каждый кадр композитора; иначе не чаще заданного
+        if (_glassFps > 0)
+        {
+            double minGap = 1000.0 / _glassFps;
+            if ((DateTime.UtcNow - _lastCapture).TotalMilliseconds < minGap) return;
+        }
+        _lastCapture = DateTime.UtcNow;
+        CaptureBehind();
     }
 
     void StopLiveGlass()
     {
-        if (_glassTimer != null) _glassTimer.Stop();
+        if (!_renderHooked) return;
+        CompositionTarget.Rendering -= OnRenderFrame;
+        _renderHooked = false;
     }
 
     /// <summary>Ставит окно в угол рабочей области — там же, где трей.</summary>

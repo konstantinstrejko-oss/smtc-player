@@ -75,9 +75,13 @@ The window is real glass: whatever sits underneath is blurred and warped by a
 pixel shader, and the tint comes from the current album art. Two layouts,
 horizontal and vertical. The window closes itself when it loses focus.
 
-The backdrop is **live**: it is re-read 25 times per second, so whatever happens
-underneath — a playing video included — shows through the glass. This costs about
-5 % of one core and only while the window is open.
+The backdrop is **live** and refreshes with the compositor's own frames — usually
+60 per second — so whatever happens underneath, a playing video included, shows
+through the glass. It is tied to frames rather than a timer: on a timer the
+capture alternately lags and repeats, and the picture tears.
+
+The cost is about **25 % of one core** while the window is open (normally a few
+seconds). `GlassFps=30` halves it and still looks smooth.
 
 > To keep the capture from picking up the window itself (which would produce an
 > endless tunnel), the window is excluded from screen capture. Side effect: **the
