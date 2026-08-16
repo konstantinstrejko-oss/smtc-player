@@ -103,8 +103,10 @@ public class TrayIcon : IDisposable
         PlayerState.Changed += OnStateChanged;
 
         // Кольцо прогресса перерисовывается раз в секунду: чаще смысла нет,
-        // а каждый кадр — это создание HICON.
-        _timer = new DispatcherTimer(DispatcherPriority.Background)
+        // а каждый кадр — это создание HICON. Приоритет Normal: открытое окно
+        // плеера гонит кадры живого стекла без пауз, и очередь Background в это
+        // время не разбирается — кольцо вставало вместе с окном.
+        _timer = new DispatcherTimer(DispatcherPriority.Normal)
         {
             Interval = TimeSpan.FromMilliseconds(1000)
         };
@@ -115,7 +117,7 @@ public class TrayIcon : IDisposable
     void OnStateChanged()
     {
         // приходит из фонового потока
-        _source.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Refresh));
+        _source.Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(Refresh));
     }
 
     // ------------------------------------------------------------ иконка

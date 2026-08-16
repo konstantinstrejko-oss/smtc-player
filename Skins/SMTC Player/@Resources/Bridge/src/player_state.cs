@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Threading;
 
 /// <summary>Журнал в тот же файл, что и у моста — разбираться удобнее в одном месте.</summary>
 public static class Diag
@@ -115,6 +116,15 @@ public static class PlayerState
     /// <summary>Состояние обновилось. Приходит из фонового потока.</summary>
     public static event Action Changed;
 
+    static long _version;
+
+    /// <summary>
+    /// Номер публикации. Событие Changed доходит до интерфейса через очередь
+    /// диспетчера, а она при живом стекле может ждать сколько угодно — поэтому
+    /// окно ещё и само сверяет номер в каждом кадре и обновляется без события.
+    /// </summary>
+    public static long Version { get { return Interlocked.Read(ref _version); } }
+
     public static void Publish(string title, string artist, string album, string appId,
                                string cover, int state, double pos, double dur, bool canSeek,
                                string[] sessions)
@@ -128,6 +138,7 @@ public static class PlayerState
             CoverPath = cover; State = state; PosSec = pos; DurSec = dur;
             CanSeek = canSeek; TrackKey = key; Sessions = sessions ?? new string[0];
         }
+        Interlocked.Increment(ref _version);
         if (trackChanged) History.Note(title, artist, appId, cover);
         History.Tick(state == 1);
         var h = Changed;

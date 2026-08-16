@@ -16,6 +16,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using System.Runtime.InteropServices;
+using System.Threading;
 using D = System.Drawing;
 // System.Windows.Shapes.Path — это фигура, а не путь к файлу; развести их явно
 using Path = System.Windows.Shapes.Path;
@@ -50,10 +51,6 @@ public class GlassShader : ShaderEffect
     public static readonly DependencyProperty RadiusProperty =
         DependencyProperty.Register("Radius", typeof(double), typeof(GlassShader),
             new UIPropertyMetadata(20.0, PixelShaderConstantCallback(3)));
-    /// <summary>Ширина фаски в точках — вся оптика живёт в ней.</summary>
-    public static readonly DependencyProperty BevelProperty =
-        DependencyProperty.Register("Bevel", typeof(double), typeof(GlassShader),
-            new UIPropertyMetadata(32.0, PixelShaderConstantCallback(4)));
     /// <summary>Курсор в точках от центра карточки.</summary>
     public static readonly DependencyProperty PointerProperty =
         DependencyProperty.Register("Pointer", typeof(Point), typeof(GlassShader),
@@ -86,7 +83,6 @@ public class GlassShader : ShaderEffect
         UpdateShaderValue(PhaseProperty);
         UpdateShaderValue(AreaProperty);
         UpdateShaderValue(RadiusProperty);
-        UpdateShaderValue(BevelProperty);
         UpdateShaderValue(PointerProperty);
         UpdateShaderValue(TouchProperty);
         UpdateShaderValue(CardProperty);
@@ -99,7 +95,6 @@ public class GlassShader : ShaderEffect
     public double Phase { get { return (double)GetValue(PhaseProperty); } set { SetValue(PhaseProperty, value); } }
     public Point Area { get { return (Point)GetValue(AreaProperty); } set { SetValue(AreaProperty, value); } }
     public double Radius { get { return (double)GetValue(RadiusProperty); } set { SetValue(RadiusProperty, value); } }
-    public double Bevel { get { return (double)GetValue(BevelProperty); } set { SetValue(BevelProperty, value); } }
     public Point Pointer { get { return (Point)GetValue(PointerProperty); } set { SetValue(PointerProperty, value); } }
     public double Touch { get { return (double)GetValue(TouchProperty); } set { SetValue(TouchProperty, value); } }
     public Point Card { get { return (Point)GetValue(CardProperty); } set { SetValue(CardProperty, value); } }
@@ -128,8 +123,12 @@ public class PlayerWindow : Window
     /// <summary>Плотность оттенка обложки поверх стекла.</summary>
     const byte TintAlpha = 0x26;
 
-    /// <summary>Запас снимка фона по краям, чтобы преломлению было что брать.</summary>
-    const double GlassPad = 24;
+    /// <summary>
+    /// Запас снимка фона по краям, чтобы искажению было что брать. Прежних 24
+    /// точек рельефу не хватало: выборка упиралась в границу снимка, и у самого
+    /// края появлялась размазанная кайма.
+    /// </summary>
+    const double GlassPad = 32;
 
     /// <summary>
     /// Поле вокруг карточки под тень. Окно на столько же больше самой карточки:
@@ -345,8 +344,7 @@ public class PlayerWindow : Window
                 _shader = new GlassShader(new Uri(shaderPath).AbsoluteUri, new Uri(noisePath).AbsoluteUri)
                 {
                     Amount = Math.Max(0.0, Math.Min(0.2, Settings.GetInt("GlassAmount", 90) / 1000.0)),
-                    Radius = Radius,
-                    Bevel = Math.Max(8, Math.Min(60, Settings.GetInt("GlassBevel", 32)))
+                    Radius = Radius
                 };
                 _glassHost.Effect = _shader;
             }
@@ -816,14 +814,31 @@ public class PlayerWindow : Window
 
     // ------------------------------------------------------------ данные
 
+    int _updateQueued;
+    long _appliedVersion = -1;
+
+    /// <summary>
+    /// Данные обновились. Приоритет Normal, а не Background: пока открыто живое
+    /// стекло, окно рисуется без остановки, и очередь Background до исполнения
+    /// не доходила — карточка замирала на том треке, который играл в момент
+    /// открытия. Заявки ещё и склеиваются: цикл SMTC публикует четыре раза в
+    /// секунду, а перерисовывать чаще, чем успевает диспетчер, незачем.
+    /// </summary>
     void OnStateChanged()
     {
-        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(Apply));
+        if (Interlocked.Exchange(ref _updateQueued, 1) == 1) return;
+        Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(delegate
+        {
+            Interlocked.Exchange(ref _updateQueued, 0);
+            Apply();
+        }));
     }
 
     public void Apply()
     {
         if (!IsVisible) return;
+        _appliedVersion = PlayerState.Version;
+        _applied++;
 
         string title = PlayerState.Title;
         if (string.IsNullOrEmpty(title) || title == "—") title = "Ничего не играет";
@@ -1194,6 +1209,7 @@ public class PlayerWindow : Window
 
     DateTime _fingerprintAt = DateTime.MinValue;
     int _capturedFrames;
+    int _applied;
 
     /// <summary>
     /// Отпечаток снимка — доказательство, что фон действительно обновляется:
@@ -1214,7 +1230,8 @@ public class PlayerWindow : Window
                 for (int x = 4; x < w; x += 17)
                     sum += Marshal.ReadInt32(row, x * 4) & 0x00FFFFFF;
             }
-            Diag.Log(string.Format("стекло: кадров {0}, отпечаток фона {1}", _capturedFrames, sum));
+            Diag.Log(string.Format("стекло: кадров {0}, отпечаток фона {1}, обновлений данных {2}",
+                                   _capturedFrames, sum, _applied));
         }
     }
 
@@ -1261,6 +1278,11 @@ public class PlayerWindow : Window
     void OnRenderFrame(object sender, EventArgs e)
     {
         if (!IsVisible) return;
+
+        // Данные — прямо в кадре. Единственный путь обновления, который не
+        // зависит от очереди диспетчера: пока идёт живое стекло, кадры не
+        // прерываются, и заявка из фонового потока может ждать бесконечно.
+        if (PlayerState.Version != _appliedVersion) Apply();
 
         // GlassFps=0 — каждый кадр композитора; иначе не чаще заданного
         if (_glassFps > 0)
